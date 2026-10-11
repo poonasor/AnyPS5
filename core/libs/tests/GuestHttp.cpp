@@ -29,6 +29,7 @@ int APS5_VABI sceHttpsSetSslVersion(int, int);
 int APS5_VABI sceHttpsGetSslError(int, int*, std::uint32_t*);
 int APS5_VABI sceHttpSetRedirectCallback(int, HttpRedirectCallback, void*);
 int APS5_VABI sceHttpSetCookieRecvCallback(int, HttpCookieRecvCallback, void*);
+int APS5_VABI sceHttpSetRequestStatusCallback(int, HttpRequestStatusCallback, void*);
 int APS5_VABI sceHttpSetAuthInfoCallback(int, HttpAuthInfoCallback, void*);
 int APS5_VABI sceHttpParseStatusLine(const char*, std::size_t, std::int32_t*, std::int32_t*, std::int32_t*, const char**, std::size_t*);
 }
@@ -222,6 +223,7 @@ int main() {
     Require(sceHttpsSetSslVersion(1, 0) == 0);
     Require(sceHttpSetRedirectCallback(1, nullptr, nullptr) == 0);
     Require(sceHttpSetCookieRecvCallback(1, nullptr, nullptr) == 0);
+    Require(sceHttpSetRequestStatusCallback(1, nullptr, nullptr) == 0);
     int sslError = -1;
     std::uint32_t sslDetail = 0xFFFFFFFFu;
     Require(sceHttpsGetSslError(1, &sslError, &sslDetail) == 0);
