@@ -370,7 +370,8 @@ std::int32_t InitializeInstance(Instance& instance, const std::uint8_t* paramete
         if (channels == 0 || channels > 8 || sampleRate == 0) return AJM_RESULT_INVALID_PARAMETER;
         std::uint32_t third = 0;
         if (size >= 12) std::memcpy(&third, parameters + 8, sizeof(third));
-        if (sampleRate != 48000 || third != 0) NotImplemented_nid_no_patch("sceAjmBatchJobInitialize (Opus sample rate other than 48000 or nonzero third parameter word)");
+        const bool singleStream = third == 0 || (third == 255 && channels == 1);
+        if (sampleRate != 48000 || !singleStream) NotImplemented_nid_no_patch("sceAjmBatchJobInitialize (Opus sample rate other than 48000, or a third parameter word other than 0 or a mono stream's 255)");
         instance.opusChannels = channels;
         instance.opusSampleRate = sampleRate;
         OpenOpus(instance);
