@@ -780,6 +780,29 @@ void DefineMeshOutputs(SpirvEmitterState& state) {
     }
 }
 
+void EmitPixelEntryPoint(SpirvEmitterState& state) {
+    state.module.AddFunction(spv::OpFunction, TypeVoid(state), state.mainFunc, spv::FunctionControlMaskNone, TypeFunction(state));
+    EmitLabel(state, state.module.AllocateId());
+    state.module.AddFunction(spv::OpStore, state.pixelStopFlag, ConstantBool(state, false));
+    state.module.AddFunction(spv::OpFunctionCall, TypeVoid(state), state.module.AllocateId(), state.pixelGuestFunc);
+    const auto stopped = state.module.AllocateId();
+    const auto stop = state.module.AllocateId();
+    const auto done = state.module.AllocateId();
+    state.module.AddFunction(spv::OpLoad, TypeBool(state), stopped, state.pixelStopFlag);
+    state.module.AddFunction(spv::OpSelectionMerge, done, spv::SelectionControlMaskNone);
+    state.module.AddFunction(spv::OpBranchConditional, stopped, stop, done);
+    EmitLabel(state, stop);
+    if (std::ranges::find(state.supportedExtensions, "SPV_KHR_terminate_invocation") != state.supportedExtensions.end()) {
+        state.module.EmitExtension("SPV_KHR_terminate_invocation");
+        state.module.AddFunction(spv::OpTerminateInvocation);
+    } else {
+        state.module.AddFunction(spv::OpKill);
+    }
+    EmitLabel(state, done);
+    state.module.AddFunction(spv::OpReturn);
+    state.module.AddFunction(spv::OpFunctionEnd);
+}
+
 void EmitMeshEntryPoint(SpirvEmitterState& state) {
     state.module.AddFunction(spv::OpFunction, TypeVoid(state), state.mainFunc, spv::FunctionControlMaskNone, TypeFunction(state));
     EmitLabel(state, state.module.AllocateId());
@@ -1143,7 +1166,13 @@ void EmitProgram(SpirvEmitterState& state) {
             break;
         }
     }
-    state.module.AddFunction(spv::OpFunction, TypeVoid(state), state.meshGuestFunc != 0u ? state.meshGuestFunc : state.mainFunc, spv::FunctionControlMaskNone, TypeFunction(state));
+    if (program.Resources().stage == IrShaderStage::Pixel && state.bdaStopsInvocations && !OrderedPixelShader(state)) {
+        state.pixelGuestFunc = state.module.AllocateId();
+        state.pixelStopFlag = state.module.DefineGlobalVariable(TypePointer(state, spv::StorageClassPrivate, TypeBool(state)), spv::StorageClassPrivate);
+        state.interfaceVariables.push_back(state.pixelStopFlag);
+        state.module.AddName(state.pixelStopFlag, "bda_stopped");
+    }
+    state.module.AddFunction(spv::OpFunction, TypeVoid(state), state.meshGuestFunc != 0u ? state.meshGuestFunc : state.pixelGuestFunc != 0u ? state.pixelGuestFunc : state.mainFunc, spv::FunctionControlMaskNone, TypeFunction(state));
     EmitLabel(state, state.entryLabel);
     if (state.requirements.functionLds) {
         state.module.AddFunction(spv::OpVariable, TypeU32ArrayPointer(state, spv::StorageClassFunction, LdsDwordCount(state)), state.ldsVariable, spv::StorageClassFunction);
@@ -1264,6 +1293,7 @@ void EmitProgram(SpirvEmitterState& state) {
         EmitControlFlow(ctx, functionState, program);
     }
     state.module.AddFunction(spv::OpFunctionEnd);
+    if (state.pixelGuestFunc != 0u) EmitPixelEntryPoint(state);
     if (state.program.Resources().stage == IrShaderStage::Mesh) {
         EmitMeshEntryPoint(state);
     }
