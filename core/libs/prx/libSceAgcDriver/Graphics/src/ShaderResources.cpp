@@ -802,9 +802,10 @@ GuestTextureResource StorageSurface(const Context& context, const GuestTextureRe
 // `guestBytes` is the surface size when the caller described the surface already (0: described here).
 std::shared_ptr<StorageTexture> cachedStorageTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& viewed, std::uint32_t mip, std::uint64_t guestBytes) {
     if (DepthSurfaceViewed(context, words, viewed)) {
-        char text[112];
-        std::snprintf(text, sizeof(text), "AGC graphics: storage image access to depth/stencil surface 0x%llx is not implemented", static_cast<unsigned long long>(viewed.baseAddress));
-        throw std::runtime_error(text);
+        static std::mutex reportMutex;
+        static std::set<std::uint64_t> reported;
+        std::lock_guard lock(reportMutex);
+        if (reported.size() < 16 && reported.insert(viewed.baseAddress).second) std::fprintf(stderr, "[gpu] storage image over depth/stencil surface 0x%llx (%ux%u format %u) does not share the surface's texels: it is read and written as guest memory\n", static_cast<unsigned long long>(viewed.baseAddress), viewed.width, viewed.height, viewed.format);
     }
     static const bool disabled = std::getenv("APS5_NO_TEXTURE_CACHE") != nullptr;
     if (disabled) return std::make_shared<StorageTexture>(context, *context.detiler, viewed, mip);
