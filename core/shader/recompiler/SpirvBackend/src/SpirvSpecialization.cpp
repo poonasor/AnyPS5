@@ -243,6 +243,7 @@ public:
             if (hasResult && hasType) resultTypes.emplace(instruction.at(2), instruction.at(1));
             if (op == spv::OpTypeBool) types.emplace(instruction.at(1), ScalarType{1u, true});
             if (op == spv::OpTypeInt) types.emplace(instruction.at(1), ScalarType{instruction.at(2), false});
+            if (op == spv::OpTypeVector) vectorComponents.emplace(instruction.at(1), instruction.at(2));
             if (op == spv::OpConstant && types.contains(instruction.at(1)) && types.at(instruction[1]).width <= 32u) values.emplace(instruction.at(2), instruction.at(3));
             if (op == spv::OpConstantTrue || op == spv::OpConstantFalse) values.emplace(instruction.at(2), op == spv::OpConstantTrue ? 1u : 0u);
             cursor += count;
@@ -350,7 +351,13 @@ private:
             if (op == spv::OpCompositeExtract && instruction.size() == 5u) extracts.emplace(instruction[2], std::pair{instruction[3], instruction[4]});
             if (op == spv::OpCompositeConstruct && instruction.size() == 7u) {
                 const auto first = extracts.find(instruction[3]);
-                bool shuffle = first != extracts.end();
+                const auto target = vectorComponents.find(instruction[1]);
+                bool shuffle = first != extracts.end() && target != vectorComponents.end();
+                if (shuffle) {
+                    const auto sourceType = resultTypes.find(first->second.first);
+                    const auto sourceVector = sourceType != resultTypes.end() ? vectorComponents.find(sourceType->second) : vectorComponents.end();
+                    shuffle = sourceVector != vectorComponents.end() && sourceVector->second == target->second;
+                }
                 for (std::size_t index = 4; shuffle && index < instruction.size(); ++index) {
                     const auto found = extracts.find(instruction[index]);
                     shuffle = found != extracts.end() && found->second.first == first->second.first;
@@ -615,6 +622,7 @@ private:
     std::map<std::uint32_t, ScalarType> types;
     std::map<std::uint32_t, std::uint32_t> values;
     std::map<std::uint32_t, std::uint32_t> resultTypes;
+    std::map<std::uint32_t, std::uint32_t> vectorComponents;
     std::set<std::uint32_t> removed;
 };
 
