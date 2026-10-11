@@ -286,6 +286,10 @@ Module Inspect(const CompiledShader& compiled, const State& state, const VkPhysi
                     Require(fragment, "SPV_EXT_fragment_shader_interlock requires a fragment shader");
                     break;
                 }
+                if (extension == "SPV_KHR_terminate_invocation") {
+                    Require(fragment, "SPV_KHR_terminate_invocation requires a fragment shader");
+                    break;
+                }
                 if (extension == "SPV_KHR_fragment_shader_barycentric") {
                     Require(fragment && fragmentShaderBarycentric, "SPV_KHR_fragment_shader_barycentric requires enabled fragmentShaderBarycentric in a fragment shader");
                     break;
