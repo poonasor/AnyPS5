@@ -287,8 +287,10 @@ int APS5_VABI sceHttpSetInflateGZIPEnabled(int id, int enable) {
     return 0;
 }
 
-int APS5_VABI sceHttpSetRequestStatusCallback(void) {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceHttpSetRequestStatusCallback(int id, HttpRequestStatusCallback cbfunc, void* user_arg) {
+    (void)id;
+    (void)cbfunc;
+    (void)user_arg;
     return 0;
 }
 
