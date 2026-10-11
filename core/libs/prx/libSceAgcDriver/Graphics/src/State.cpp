@@ -1806,7 +1806,14 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allo
         const auto clear = find(cx, 0x323 + word + stride);
         color.clearWords[word] = clear == cx.end() ? 0u : clear->second;
     }
-    if (((info & 0x2000u) != 0 || (color.samples > 1 && (info & 0x4000u) != 0)) && (color.samples > 1 || viewMip == 0)) {
+    if ((info & 0x2000u) != 0 && color.samples == 1 && viewMip == 0 && (volume || slice != 0 || color.arrayLastSlice != 0 || (maxMip != 0 && color.elementBytes <= 2))) {
+        static bool reported = false;
+        if (!reported) {
+            reported = true;
+            std::fprintf(stderr, "[gpu] CMASK fast clears of 3D, array and 8/16 bpp mipmapped color targets are ignored (first: 0x%llx, %ux%u, %u mips, slice %u%s)
+", static_cast<unsigned long long>(color.surfaceAddress), color.surfaceExtent.width, color.surfaceExtent.height, maxMip + 1u, slice, volume ? ", 3D" : "");
+        }
+    } else if (((info & 0x2000u) != 0 || (color.samples > 1 && (info & 0x4000u) != 0)) && (color.samples > 1 || viewMip == 0)) {
         Require(color.samples > 1 || (!volume && slice == 0 && color.arrayLastSlice == 0), "CMASK fast clears of a 3D or array color target are unsupported");
         Require(((attrib3 >> 19u) & 0x1fu) == 0x18u && (attrib3 & 0x4000000u) != 0, "CMASK fast clears need pipe-aligned SW_64KB_Z_X metadata (CB_COLOR_ATTRIB3 FMASK_SW_MODE 24, CMASK_PIPE_ALIGNED)");
         if (color.samples == 1) {
