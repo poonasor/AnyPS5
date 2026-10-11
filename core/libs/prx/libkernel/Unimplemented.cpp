@@ -28,7 +28,8 @@ int* APS5_VABI __error(void) {
     return &guestErrno;
 }
 
-int APS5_VABI rename(const char* from, const char* to) {
+APS5_EXPORT("rename", GuestRename);
+int APS5_VABI GuestRename(const char* from, const char* to) {
     if (!from || !to) return -1;
     return std::rename(from, to) == 0 ? 0 : -1;
 }
