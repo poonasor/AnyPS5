@@ -199,8 +199,7 @@ void ClearDepthSurfaces(VkDevice device) {
     std::erase_if(surfaces(), [&](const auto& surface) { return surface->context.device == device; });
 }
 
-std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components) {
-    std::lock_guard lock(surfacesMutex());
+static DepthSurface* viewedSurface(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource) {
     const auto& list = surfaces();
     const auto found = std::find_if(list.rbegin(), list.rend(), [&](const auto& surface) {
         return surface->context.device == context.device && (surface->target.address == resource.baseAddress || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == resource.baseAddress));
@@ -214,7 +213,13 @@ std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<c
         const bool depthBits = words.size() >= 4 && ShaderRecompiler::DepthBitsTextureWidth(words[1], words[3]) == (d16 ? 16u : 32u);
         if (ResolveTextureFormat(resource.format) != (d16 ? VK_FORMAT_R16_UNORM : VK_FORMAT_R32_SFLOAT) && !depthBits) return nullptr;
     }
-    return (*found)->Sampled(words, resource, components);
+    return found->get();
+}
+
+std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components) {
+    std::lock_guard lock(surfacesMutex());
+    auto* surface = viewedSurface(context, words, resource);
+    return surface != nullptr ? surface->Sampled(words, resource, components) : nullptr;
 }
 
 bool DepthSurfaceAt(std::uint64_t address) {
@@ -222,12 +227,9 @@ bool DepthSurfaceAt(std::uint64_t address) {
     return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) { return surface->target.address == address || surface->target.stencilAddress == address; });
 }
 
-bool DepthSurfaceAt(std::uint64_t address, VkExtent2D extent) {
+bool DepthSurfaceViewed(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource) {
     std::lock_guard lock(surfacesMutex());
-    return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) {
-        const auto& target = surface->target;
-        return (target.address == address || target.stencilAddress == address) && target.extent.width == extent.width && target.extent.height == extent.height;
-    });
+    return viewedSurface(context, words, resource) != nullptr;
 }
 
 }
