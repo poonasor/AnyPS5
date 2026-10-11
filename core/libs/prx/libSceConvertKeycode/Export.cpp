@@ -27,4 +27,10 @@ int APS5_VABI sceConvertKeycodeGetCharacterFromKeyboardData(void) {
     return 0;
 }
 
+int APS5_VABI sceConvertKeycodeGetCharacter(std::uint64_t a0, std::uint64_t a1, std::uint64_t a2, std::uint64_t a3) {
+ APS5_HIT("CONVERTKEYCODE", "sceConvertKeycodeGetCharacter args 0x%llx 0x%llx 0x%llx 0x%llx -> error (signature unknown)",
+          static_cast<unsigned long long>(a0), static_cast<unsigned long long>(a1), static_cast<unsigned long long>(a2), static_cast<unsigned long long>(a3));
+ return kErrInvalidAddress;
+}
+
 }
