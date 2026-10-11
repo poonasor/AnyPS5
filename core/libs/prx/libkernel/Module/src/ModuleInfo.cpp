@@ -325,4 +325,8 @@ int APS5_VABI sceKernelGetModuleInfo(KernelModule handle, ModuleInfo* info) {
     return SCE_KERNEL_ERROR_ESRCH;
 }
 
+int APS5_VABI sceKernelGetModuleInfo2(KernelModule handle, ModuleInfo* info) {
+    return sceKernelGetModuleInfo(handle, info);
+}
+
 }
