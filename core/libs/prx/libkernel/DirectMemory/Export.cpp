@@ -35,6 +35,7 @@ namespace {
 constexpr size_t FLEXIBLE_MEMORY_SIZE = 448ULL * 1024 * 1024;
 
 constexpr int PRT_APERTURE_COUNT = 3;
+constexpr int PAGE_TABLE_POOL_PAGES = 65536;
 
 struct PrtAperture {
     void* address;
@@ -380,11 +381,10 @@ int APS5_VABI sceKernelClearVirtualRangeName(const void* addr, uint64_t len) {
 }
 
 int APS5_VABI sceKernelGetPageTableStats(int* cpu_total, int* cpu_available, int* gpu_total, int* gpu_available) {
- (void)cpu_total;
- (void)cpu_available;
- (void)gpu_total;
- (void)gpu_available;
- NotImplemented_nid_no_patch(__func__);
+ if (cpu_total) *cpu_total = PAGE_TABLE_POOL_PAGES;
+ if (cpu_available) *cpu_available = PAGE_TABLE_POOL_PAGES;
+ if (gpu_total) *gpu_total = PAGE_TABLE_POOL_PAGES;
+ if (gpu_available) *gpu_available = PAGE_TABLE_POOL_PAGES;
  return 0;
 }
 
