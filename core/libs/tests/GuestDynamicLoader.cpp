@@ -77,6 +77,16 @@ int main(int argc, char** argv) {
     Require(redirected != nullptr);
     add = reinterpret_cast<Add>(dlsym_nid_postfix(redirected, "GuestModuleAdd"));
     Require(add && add(40, 2) == 42);
+#ifdef _WIN32
+    const std::filesystem::path aliasDirectory = "anyps5-relinked-alias-for-test";
+    std::filesystem::create_directory(aliasDirectory);
+    void* aliased = dlopen_nid_postfix((aliasDirectory / guest).string().c_str(), 2);
+    Require(aliased != nullptr && aliased != redirected);
+    Require(dlsym_nid_postfix(aliased, "GuestModuleAdd") == reinterpret_cast<void*>(add));
+    Require(dlclose_nid_postfix(aliased) == 0);
+    Require(add(40, 2) == 42);
+    std::filesystem::remove(aliasDirectory);
+#endif
     Require(dlclose_nid_postfix(redirected) == 0);
     std::filesystem::remove(guest);
     std::filesystem::remove(relinked);
