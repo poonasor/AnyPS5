@@ -68,7 +68,7 @@ struct KernelEqueueEvent {
     std::int64_t lowWater = 0;
     KernelEvent event;
     KernelFilter filter;
-    std::deque<KernelEvent> pendingEvents;
+    std::list<KernelEvent> pendingEvents;
 };
 
 class KernelEqueuePrivate {
