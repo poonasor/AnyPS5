@@ -306,6 +306,7 @@ struct VulkanDevice::State {
     bool samplerFilterMinmax = false;
     bool nonSeamlessCubeMap = false;
     bool fragmentShaderPixelInterlock = false;
+    bool shaderTerminateInvocation = false;
     bool conservativeRasterization = false;
     bool provokingVertexLast = false;
     bool provokingVertexModePerPipeline = false;
@@ -1088,6 +1089,14 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     }
     interlockFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT};
     interlockFeatures.fragmentShaderPixelInterlock = VK_TRUE;
+    VkPhysicalDeviceShaderTerminateInvocationFeaturesKHR terminateFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_TERMINATE_INVOCATION_FEATURES_KHR};
+    if (hasExtension(VK_KHR_SHADER_TERMINATE_INVOCATION_EXTENSION_NAME)) {
+        VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &terminateFeatures};
+        state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures2>("vkGetPhysicalDeviceFeatures2")(selected, &features);
+        state->shaderTerminateInvocation = terminateFeatures.shaderTerminateInvocation == VK_TRUE;
+    }
+    terminateFeatures = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_TERMINATE_INVOCATION_FEATURES_KHR};
+    terminateFeatures.shaderTerminateInvocation = VK_TRUE;
     VkPhysicalDeviceShaderClockFeaturesKHR clockFeatures{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR};
     if (hasExtension(VK_KHR_SHADER_CLOCK_EXTENSION_NAME)) {
         VkPhysicalDeviceFeatures2 features{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, &clockFeatures};
@@ -1117,6 +1126,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         deviceExtensions.push_back(VK_EXT_SHADER_STENCIL_EXPORT_EXTENSION_NAME);
         state->capabilities.push_back(spv::CapabilityStencilExportEXT);
         state->spirvExtensions.push_back("SPV_EXT_shader_stencil_export");
+    }
+    if (state->shaderTerminateInvocation) {
+        deviceExtensions.push_back(VK_KHR_SHADER_TERMINATE_INVOCATION_EXTENSION_NAME);
+        state->spirvExtensions.push_back("SPV_KHR_terminate_invocation");
     }
     if (state->shaderClock) {
         deviceExtensions.push_back(VK_KHR_SHADER_CLOCK_EXTENSION_NAME);
@@ -1493,6 +1506,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
     if (state->fragmentShaderPixelInterlock) {
         interlockFeatures.pNext = byteFeatures.pNext;
         byteFeatures.pNext = &interlockFeatures;
+    }
+    if (state->shaderTerminateInvocation) {
+        terminateFeatures.pNext = byteFeatures.pNext;
+        byteFeatures.pNext = &terminateFeatures;
     }
     if (state->shaderClock) {
         clockFeatures.pNext = byteFeatures.pNext;

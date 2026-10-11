@@ -204,6 +204,7 @@ bool VisitInputs(const Instruction& instruction, const TVisitor& visit) {
     case spv::OpReturn:
     case spv::OpUnreachable:
     case spv::OpKill:
+    case spv::OpTerminateInvocation:
     case spv::OpLabel:
     case spv::OpFunction:
     case spv::OpFunctionEnd:
