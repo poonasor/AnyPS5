@@ -105,7 +105,10 @@ std::shared_ptr<const ShaderSnapshot> ReadRawComputeShader(std::uint64_t address
 
 namespace {
 
+void PrioritizeRegisteredPreparation(const PreparedShaders& prepared);
+
 void AwaitRegisteredPreparation(PreparedShaders& prepared, std::unique_lock<std::mutex>& lock) {
+    if (prepared.pending) PrioritizeRegisteredPreparation(prepared);
     prepared.settled.wait(lock, [&] { return !prepared.pending; });
     if (prepared.failure != nullptr) std::rethrow_exception(prepared.failure);
 }
@@ -525,16 +528,25 @@ public:
         return *pool;
     }
 
-    void Submit(std::function<void()> task) {
+    void Submit(const PreparedShaders* owner, std::function<void()> task) {
         if (threads == 0) {
             task();
             return;
         }
         {
             std::lock_guard lock(mutex);
-            tasks.push_back(std::move(task));
+            tasks.emplace_back(owner, std::move(task));
         }
         ready.notify_one();
+    }
+
+    void Prioritize(const PreparedShaders* owner) {
+        std::lock_guard lock(mutex);
+        const auto found = std::ranges::find(tasks, owner, &Task::first);
+        if (found == tasks.end() || found == tasks.begin()) return;
+        auto task = std::move(*found);
+        tasks.erase(found);
+        tasks.push_front(std::move(task));
     }
 
 private:
@@ -560,7 +572,7 @@ private:
             {
                 std::unique_lock lock(pool.mutex);
                 pool.ready.wait(lock, [&] { return !pool.tasks.empty(); });
-                task = std::move(pool.tasks.front());
+                task = std::move(pool.tasks.front().second);
                 pool.tasks.pop_front();
             }
             task();
@@ -570,9 +582,14 @@ private:
 
     std::mutex mutex;
     std::condition_variable ready;
-    std::deque<std::function<void()>> tasks;
+    using Task = std::pair<const PreparedShaders*, std::function<void()>>;
+    std::deque<Task> tasks;
     unsigned threads = 0;
 };
+
+void PrioritizeRegisteredPreparation(const PreparedShaders& prepared) {
+    RegistrationPreparePool::Instance().Prioritize(&prepared);
+}
 
 bool AsyncRegistrationPrepare() {
     static const bool sync = std::getenv("APS5_SYNC_SHADER_PREPARE") != nullptr;
@@ -580,7 +597,8 @@ bool AsyncRegistrationPrepare() {
 }
 
 void PrepareRegisteredInBackground(std::shared_ptr<const ShaderSnapshot> snapshot, std::shared_ptr<RegisteredPreparation> plan) {
-    RegistrationPreparePool::Instance().Submit([snapshot = std::move(snapshot), plan = std::move(plan)] {
+    const auto* owner = snapshot->prepared.get();
+    RegistrationPreparePool::Instance().Submit(owner, [snapshot = std::move(snapshot), plan = std::move(plan)] {
         PerformanceContext timingContext(FrameTiming::Preparation());
         std::vector<PreparedShaders::Entry> entries;
         std::exception_ptr failure;
