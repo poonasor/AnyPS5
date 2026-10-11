@@ -237,4 +237,12 @@ bool DepthSurfaceAt(std::uint64_t address) {
     return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) { return surface->target.address == address || surface->target.stencilAddress == address; });
 }
 
+bool DepthSurfaceAt(std::uint64_t address, VkExtent2D extent) {
+    std::lock_guard lock(surfacesMutex());
+    return std::any_of(surfaces().begin(), surfaces().end(), [&](const auto& surface) {
+        const auto& target = surface->target;
+        return (target.address == address || target.stencilAddress == address) && target.extent.width == extent.width && target.extent.height == extent.height;
+    });
+}
+
 }

@@ -177,5 +177,9 @@ void RunDepthSurfaceReuseTests() {
     Require(lookup(context, {depth32, FormatR32Uint, 384, 384, TileRenderTarget64KB}) == nullptr, "an R32 uint view without a depth layout must be read as reused memory");
     Require(lookup(context, {depth16, FormatR32Float, 256, 256}) == nullptr, "an R32F view of a D16 surface's own extent must be read as reused memory");
 
+    Require(DepthSurfaceAt(depth32, {384, 384}), "a depth surface must be found at its address and extent");
+    Require(!DepthSurfaceAt(depth32, {768, 768}), "another extent over a depth surface must be read as reused memory");
+    Require(!DepthSurfaceAt(depth16, {384, 384}), "a depth surface must not be found under another surface's extent");
+
     ClearDepthSurfaces(context.device);
 }
