@@ -30,6 +30,7 @@ struct Module {
     void* native = nullptr;
     bool owned = true;
     bool global = false;
+    bool shared = false;
     ~Module() {
         if (owned && native) {
 #ifdef _WIN32
@@ -110,6 +111,21 @@ static std::filesystem::path RelinkedModulePath(const std::filesystem::path& pat
     std::error_code error;
     return std::filesystem::is_regular_file(relinked, error) ? relinked : path;
 }
+#ifdef _WIN32
+static void* LoadedRelinkedModule(const std::filesystem::path& path) {
+    auto relinked = path;
+    if (!relinked.native().ends_with(L".guest.prx")) relinked += ".guest.prx";
+    const auto name = relinked.filename();
+    HMODULE loaded = nullptr;
+    if (!GetModuleHandleExW(0, name.c_str(), &loaded)) return nullptr;
+    std::wstring loadedPath(32768, L'\0');
+    loadedPath.resize(GetModuleFileNameW(loaded, loadedPath.data(), static_cast<DWORD>(loadedPath.size())));
+    std::error_code error;
+    if (!loadedPath.empty() && !std::filesystem::equivalent(loadedPath, relinked, error)) return loaded;
+    FreeLibrary(loaded);
+    return nullptr;
+}
+#endif
 
 void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
     if ((flags & ~0x103) || (flags & 3) == 0 || (flags & 3) == 3) {
@@ -124,8 +140,10 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
             module->owned = false;
         } else {
             if (!*path) { Error("dlopen: empty module path"); return nullptr; }
-            const auto resolved = RelinkedModulePath(ResolvePath_nid_no_patch(path));
-            module->native = LoadLibraryExW(resolved.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            const auto requested = ResolvePath_nid_no_patch(path);
+            module->native = LoadedRelinkedModule(requested);
+            module->shared = module->native != nullptr;
+            if (!module->native) module->native = LoadLibraryExW(RelinkedModulePath(requested).c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
         }
         if (!module->native) {
             char message[128];
@@ -189,7 +207,7 @@ int APS5_VABI dlclose_nid_postfix(void* handle) {
 #endif
     }
 #ifdef _WIN32
-    if (module->owned && module->native && lastReference) {
+    if (module->owned && !module->shared && module->native && lastReference) {
         GuestAllocations::Mutation mutation;
         mutation.UnregisterImage(module->native);
     }
