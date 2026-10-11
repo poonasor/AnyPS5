@@ -334,6 +334,21 @@ static void RunThread(std::unique_ptr<ThreadArgs> args) {
     CurrentGuestState().current = nullptr;
 }
 
+#ifdef _WIN32
+static void AwaitReap(PthreadPrivate* self) {
+    std::unique_lock lock(self->_join_mtx);
+    self->reapCondition.wait(lock, [&] { return self->reaped; });
+}
+
+static void Reap(PthreadPrivate* thread) {
+    {
+        std::lock_guard lock(thread->_join_mtx);
+        thread->reaped = true;
+    }
+    thread->reapCondition.notify_all();
+}
+#endif
+
 static void ReleaseThread(PthreadPrivate* thread) {
     if (thread->_adopted)
         return;
@@ -421,6 +436,7 @@ static unsigned __stdcall StartNativeThread(void* opaque) {
     args.reset();
     RunThread(std::move(guest));
     CurrentGuestState().current = nullptr;
+    AwaitReap(self);
     ReleaseThread(self);
     return 0;
 }
@@ -471,6 +487,9 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     bool detached = false;
     if (attr && *attr) detached = ((*attr)->_detachstate == DETACH_DETACHED);
     p->_detached = detached;
+#ifdef _WIN32
+    p->reaped = detached;
+#endif
     p->stackSize = attr ? (*attr)->_stacksize : DEFAULT_STACK_SIZE;
     if (attr) {
         p->affinity.store((*attr)->_affinity, std::memory_order_relaxed);
@@ -554,6 +573,7 @@ int APS5_VABI scePthreadJoin(Pthread thread, void** retval) {
         ThreadCancel::WaitUntil(thread->_join_cv, lock, std::nullopt, [&] { return thread->_finished.load(); });
     }
 #ifdef _WIN32
+    Reap(thread);
     if (WaitForSingleObject(thread->nativeHandle, INFINITE) != WAIT_OBJECT_0)
         throw std::system_error(GetLastError(), std::system_category(), "Joining guest thread");
     if (retval) *retval = thread->_retval;
@@ -572,6 +592,7 @@ int APS5_VABI scePthreadDetach(Pthread thread) {
     if (thread->_detached) return SCE_KERNEL_ERROR_EINVAL;
     thread->_detached = true;
 #ifdef _WIN32
+    Reap(thread);
     ReleaseThread(thread);
 #else
     if (const int result = pthread_detach(thread->hostThread); result != 0)
@@ -590,6 +611,7 @@ void APS5_VABI scePthreadExit(void* retval) {
     finishThread(self, retval);
     CurrentGuestState().current = nullptr;
 #ifdef _WIN32
+    AwaitReap(self);
     ReleaseThread(self);
     _endthreadex(0);
 #else
