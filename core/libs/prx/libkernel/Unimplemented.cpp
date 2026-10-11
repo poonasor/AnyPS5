@@ -1,5 +1,7 @@
 #include <cstdint>
 #include <cstddef>
+#include <cstdio>
+#include <stdexcept>
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 
@@ -13,6 +15,22 @@ int APS5_VABI sceCoredumpWriteUserData() {
 int APS5_VABI __tls_get_addr_nid_postfix(void) {
     NotImplemented_nid_no_patch("vNe1w4diLCs");
     return 0;
+}
+
+void APS5_VABI __stack_chk_fail(void) {
+    throw std::runtime_error("__stack_chk_fail");
+}
+
+std::uint64_t __stack_chk_guard = 0x28;
+
+int* APS5_VABI __error(void) {
+    static thread_local int guestErrno = 0;
+    return &guestErrno;
+}
+
+int APS5_VABI rename(const char* from, const char* to) {
+    if (!from || !to) return -1;
+    return std::rename(from, to) == 0 ? 0 : -1;
 }
 
 APS5_EXPORT("AC1FtjqMCL0", sceKernelUnknown03);
