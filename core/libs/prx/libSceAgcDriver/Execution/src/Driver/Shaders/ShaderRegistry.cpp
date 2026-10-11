@@ -1324,6 +1324,18 @@ private:
     bool closed = false;
 };
 
+bool RegistrationPrepareAdmitted() {
+    static const std::uint64_t limit = [] {
+        const char* text = std::getenv("APS5_REGISTRATION_PREPARE_LIMIT");
+        return text != nullptr ? std::strtoull(text, nullptr, 10) : 1024ull;
+    }();
+    static std::atomic<std::uint64_t> admitted{0};
+    if (admitted.fetch_add(1, std::memory_order_relaxed) < limit) return true;
+    static std::atomic<bool> reported{false};
+    if (!reported.exchange(true)) std::fprintf(stderr, "[gpu] %llu registered shaders were prepared ahead of use; later ones are prepared when they are first used (APS5_REGISTRATION_PREPARE_LIMIT)\n", static_cast<unsigned long long>(limit));
+    return false;
+}
+
 bool AsyncRegistrationPrepare() {
     static const bool sync = std::getenv("APS5_SYNC_SHADER_PREPARE") != nullptr;
     return !sync;
@@ -1857,6 +1869,10 @@ void Driver::RegisterShader(const Shader* shader) {
         snapshot.prepared->deferred = true;
     } else if (AsyncRegistrationPrepare()) {
         preparation = PlanRegistered(snapshot, *localDevice, registered, true, &snapshot.prepared->deferred);
+        if (preparation != nullptr && !RegistrationPrepareAdmitted()) {
+            preparation = nullptr;
+            snapshot.prepared->deferred = true;
+        }
         if (preparation != nullptr) preparation->prebuildDevice = localDevice;
         if (preparation != nullptr && (snapshot.type == 0 || snapshot.type == 1)) BuildRegisteredAbiKey(registered, *localDevice, preparation->abiKey);
         snapshot.prepared->pending = preparation != nullptr;
