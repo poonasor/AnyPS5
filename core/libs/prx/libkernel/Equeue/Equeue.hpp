@@ -62,7 +62,7 @@ struct KernelEqueueEvent {
     uint64_t intervalNs = 0;
     KernelEvent event;
     KernelFilter filter;
-    std::deque<KernelEvent> pendingEvents;
+    std::list<KernelEvent> pendingEvents;
 };
 
 class KernelEqueuePrivate {
