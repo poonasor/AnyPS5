@@ -1302,7 +1302,7 @@ void cmaskTests() {
     Require(CmaskBytes(1920, 1080) == 0x6000 && CmaskBytes(960, 544) == 0x2000 && CmaskBytes(800, 450) == 0x1000 && CmaskBytes(1024, 512) == 0x1000 && CmaskBytes(3840, 2160) == 0x14000, "a CMASK does not span whole 1024x512 metablocks");
     auto mipmapped = queue;
     mipmapped.context[0x3b0] |= 1u << 28u;
-    expectFailure([&] { DecodeColorBuffer(mipmapped.context, 0); }, "mipmapped, 3D or array");
+    Require(DecodeColorBuffer(mipmapped.context, 0).cmaskAddress == 0, "a mipmapped fast-clear target kept a CMASK");
     auto unaddressed = queue;
     unaddressed.context[0x31f] = 0;
     unaddressed.context[0x398] = 0;
