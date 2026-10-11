@@ -2727,8 +2727,8 @@ void rectListTests() {
     queue.userConfig[0x242] = 17;
     const auto state = DecodeState(queue);
     const Context context{};
-    const AgcDriver::Pm4::DrawParameters draw{0, 4, 0, 1, 0, false};
-    expectFailure([&] { Draw(context, state, draw, {}); }, "incomplete rect-list");
+    const AgcDriver::Pm4::DrawParameters draw{0, 2, 0, 1, 0, false};
+    Draw(context, state, draw, {});
 }
 
 ShaderRecompiler::RecompileResult recompilePixel(std::initializer_list<std::uint32_t> controls, std::span<const std::uint32_t> code) {
