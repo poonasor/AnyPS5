@@ -541,6 +541,46 @@ std::uint32_t EmitRuntimeBufferLoad(SpirvValueEmitContext& context, const IrValu
         if (memory.formatted) return EmitValueOrDefaultIfCondition(state, resource.valid, type, zero, [&] { return formattedDispatch(context, instruction, resource, components, false, 0u); });
         const auto readComponents = [&] {
             std::array<std::uint32_t, 4> values{};
+            if (memory.gpuDescriptor && memory.dataBits == 32u && components > 1u) {
+                const auto u32 = TypeU32(state);
+                const auto boolean = TypeBool(state);
+                const auto u64 = TypeScalarU64(state);
+                std::array<RuntimeAddress, 4> accesses{};
+                for (std::uint32_t component = 0; component < components; ++component) accesses[component] = address(context, instruction, resource, component * 4u, 4u);
+                const auto before = state.module.AllocateId();
+                const auto header = state.module.AllocateId();
+                const auto body = state.module.AllocateId();
+                const auto continuation = state.module.AllocateId();
+                const auto merge = state.module.AllocateId();
+                state.module.AddFunction(spv::OpBranch, before);
+                EmitLabel(state, before);
+                state.module.AddFunction(spv::OpBranch, header);
+                EmitLabel(state, header);
+                const auto component = state.module.AllocateId();
+                const auto gathered = state.module.AllocateId();
+                const auto nextComponent = state.module.AllocateId();
+                const auto nextGathered = state.module.AllocateId();
+                state.module.AddFunction(spv::OpPhi, u32, component, ConstantU32(state, 0u), before, nextComponent, continuation);
+                state.module.AddFunction(spv::OpPhi, type, gathered, zero, before, nextGathered, continuation);
+                state.module.AddFunction(spv::OpLoopMerge, merge, continuation, spv::LoopControlMaskNone);
+                state.module.AddFunction(spv::OpBranchConditional, Binary(state, spv::OpULessThan, boolean, component, ConstantU32(state, components)), body, merge);
+                EmitLabel(state, body);
+                auto guest = accesses[components - 1u].guest;
+                auto inBounds = accesses[components - 1u].inBounds;
+                for (std::uint32_t index = components - 1u; index-- > 0u;) {
+                    const auto selected = Binary(state, spv::OpIEqual, boolean, component, ConstantU32(state, index));
+                    guest = Select(state, u64, selected, accesses[index].guest, guest);
+                    inBounds = Select(state, boolean, selected, accesses[index].inBounds, inBounds);
+                }
+                const auto read = EmitValueOrZeroIfCondition(state, inBounds, [&] { return readBuffer(context, instruction, guest, 32u); });
+                state.module.AddFunction(spv::OpVectorInsertDynamic, type, nextGathered, gathered, read, component);
+                state.module.AddFunction(spv::OpBranch, continuation);
+                EmitLabel(state, continuation);
+                state.module.AddFunction(spv::OpIAdd, u32, nextComponent, component, ConstantU32(state, 1u));
+                state.module.AddFunction(spv::OpBranch, header);
+                EmitLabel(state, merge);
+                return gathered;
+            }
             for (std::uint32_t component = 0; component < components; ++component) {
                 const auto access = address(context, instruction, resource, component * 4u, memory.dataBits / 8u);
                 values[component] = EmitValueOrZeroIfCondition(state, access.inBounds, [&] { return readBuffer(context, instruction, access.guest, memory.dataBits); });
