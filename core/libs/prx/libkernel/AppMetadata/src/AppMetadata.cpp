@@ -96,6 +96,14 @@ std::uint32_t GetAppAttribute3_nid_no_patch() {
     return g_attribute3;
 }
 
+std::uint64_t GetAppFlexibleMemorySize_nid_postfix() {
+    static const std::uint64_t size = [] {
+        const auto resolvedPath = ResolvePath_nid_no_patch(AppMetadataParamJsonGuestPath);
+        return std::filesystem::exists(resolvedPath) ? parseParamJson(resolvedPath).flexibleMemorySize : 0;
+    }();
+    return size;
+}
+
 std::int32_t GetAppUserDefinedParam_nid_postfix(std::uint32_t index) {
     if (index >= 4) throw std::out_of_range("user defined param index out of range");
     ensureTitleLoaded();

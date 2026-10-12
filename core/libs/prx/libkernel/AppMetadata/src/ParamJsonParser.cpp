@@ -322,6 +322,15 @@ ParsedParamJson parseParamJson(const std::filesystem::path& paramJsonPath) {
             result.downloadDataSizeMiB = static_cast<std::uint64_t>(downloadData->numberValue);
         }
     }
+    if (const JsonValue* kernel = findObjectMember(root, "kernel")) {
+        if (kernel->type != JsonType::Object) throw std::runtime_error("param.json kernel is not an object");
+        if (const JsonValue* flexible = findObjectMember(*kernel, "flexibleMemorySize")) {
+            const auto& number = flexible->numberText;
+            if (flexible->type != JsonType::Number || number.find_first_of("-.eE") != std::string::npos) throw std::runtime_error("param.json kernel.flexibleMemorySize is not a size");
+            const auto parsed = std::from_chars(number.data(), number.data() + number.size(), result.flexibleMemorySize);
+            if (parsed.ec != std::errc{} || parsed.ptr != number.data() + number.size()) throw std::runtime_error("param.json kernel.flexibleMemorySize exceeds uint64 range");
+        }
+    }
     for (int index = 0; index < 4; ++index) {
         const std::string key = "userDefinedParam" + std::to_string(index + 1);
         const JsonValue* param = findObjectMember(root, key);

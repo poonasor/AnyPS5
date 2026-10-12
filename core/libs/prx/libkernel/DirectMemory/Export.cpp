@@ -31,10 +31,19 @@
 #include <mutex>
 
 extern "C" std::uint64_t GuestImageSegmentBytes_nid_no_patch();
+extern "C" std::uint64_t GetAppFlexibleMemorySize_nid_postfix();
 
 namespace {
 
-constexpr size_t FLEXIBLE_MEMORY_SIZE = 448ULL * 1024 * 1024;
+constexpr size_t DEFAULT_FLEXIBLE_MEMORY_SIZE = 448ULL * 1024 * 1024;
+
+size_t FlexibleMemorySize() {
+    static const size_t size = [] {
+        const auto configured = GetAppFlexibleMemorySize_nid_postfix();
+        return configured != 0 ? static_cast<size_t>(configured) : DEFAULT_FLEXIBLE_MEMORY_SIZE;
+    }();
+    return size;
+}
 
 constexpr int PRT_APERTURE_COUNT = 3;
 constexpr int PAGE_TABLE_POOL_PAGES = 65536;
@@ -96,8 +105,8 @@ int _mapFlexible(void** addr, size_t len, int prot, int flags) {
     const size_t images = GuestImageSegmentBytes_nid_no_patch();
     std::lock_guard lock(g_flexibleLock);
     const size_t used = images + _flexibleUsedLocked();
-    if (len > FLEXIBLE_MEMORY_SIZE - std::min(FLEXIBLE_MEMORY_SIZE, used)) {
-        std::fprintf(stderr, "[memory] flexible memory exhausted: request 0x%zx with 0x%zx of 0x%zx in use\n", len, used, static_cast<size_t>(FLEXIBLE_MEMORY_SIZE));
+    if (len > FlexibleMemorySize() - std::min(FlexibleMemorySize(), used)) {
+        std::fprintf(stderr, "[memory] flexible memory exhausted: request 0x%zx with 0x%zx of 0x%zx in use\n", len, used, FlexibleMemorySize());
         return SCE_KERNEL_ERROR_ENOMEM;
     }
     const int result = DoMapAnon(addr, len, prot, flags);
@@ -361,13 +370,13 @@ int APS5_VABI sceKernelAvailableFlexibleMemorySize(size_t* size) {
  if (!size) return SCE_KERNEL_ERROR_EINVAL;
  const size_t images = GuestImageSegmentBytes_nid_no_patch();
  std::lock_guard lock(g_flexibleLock);
- *size = FLEXIBLE_MEMORY_SIZE - std::min(FLEXIBLE_MEMORY_SIZE, images + _flexibleUsedLocked());
+ *size = FlexibleMemorySize() - std::min(FlexibleMemorySize(), images + _flexibleUsedLocked());
  return 0;
 }
 
 int APS5_VABI sceKernelConfiguredFlexibleMemorySize(size_t* size) {
  if (!size) return SCE_KERNEL_ERROR_EINVAL;
- *size = FLEXIBLE_MEMORY_SIZE;
+ *size = FlexibleMemorySize();
  return 0;
 }
 

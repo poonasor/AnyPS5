@@ -142,6 +142,19 @@ static void CheckUtf8(const std::filesystem::path& path) {
     Require(rejected, "Accepted malformed UTF-8 object key");
 }
 
+static void CheckFlexibleMemorySize(const std::filesystem::path& path) {
+    const std::string prefix = R"({"titleId":"PPSA00000","localizedParameters":{"en-US":{"titleName":"Example"}})";
+    Require(ParseText(path, prefix + "}").flexibleMemorySize == 0, "Flexible memory size without a kernel object");
+    Require(ParseText(path, prefix + R"(,"kernel":{}})").flexibleMemorySize == 0, "Flexible memory size without the member");
+    Require(ParseText(path, prefix + R"(,"kernel":{"flexibleMemorySize":587202560}})").flexibleMemorySize == 587202560, "Incorrect flexible memory size");
+    for (const auto* kernel : {R"("kernel":4)", R"("kernel":{"flexibleMemorySize":-1})", R"("kernel":{"flexibleMemorySize":1.5})", R"("kernel":{"flexibleMemorySize":"587202560"})",
+                               R"("kernel":{"flexibleMemorySize":1e3})", R"("kernel":{"flexibleMemorySize":18446744073709551616})"}) {
+        bool rejected = false;
+        try { ParseText(path, prefix + "," + kernel + "}"); } catch (const std::exception&) { rejected = true; }
+        Require(rejected, std::string("Accepted invalid flexible memory size: ") + kernel);
+    }
+}
+
 int main() {
     const auto path = std::filesystem::temp_directory_path() / ("anyps5-param-json-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".json");
@@ -170,6 +183,7 @@ int main() {
         CheckLanguages(path);
         CheckUserDefinedParams(path);
         CheckOutputPermission(path);
+        CheckFlexibleMemorySize(path);
         CheckNesting(path);
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';
