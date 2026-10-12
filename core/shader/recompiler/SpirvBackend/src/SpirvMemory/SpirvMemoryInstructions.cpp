@@ -202,6 +202,19 @@ std::uint32_t GuestAddress(SpirvValueEmitContext& ctx, const IrValue& inst, cons
     return AddBdaImmediate(ctx, inst, address, immediate);
 }
 
+bool SameAddressValue(const IrValue* left, const IrValue* right, std::uint32_t depth = 0u) {
+    if (left == right) return true;
+    if (left == nullptr || right == nullptr || depth > 3u || left->Opcode() != right->Opcode() || left->ArgumentCount() != right->ArgumentCount()) return false;
+    if (left->HasImmediate() || right->HasImmediate()) return left->HasImmediate() && right->HasImmediate() && left->ArgumentCount() == 0u && left->ImmediateU32() == right->ImmediateU32();
+    if (left->Opcode() != IrOpcode::GetAddressResource && left->Opcode() != IrOpcode::SelectU32) return false;
+    for (std::size_t index = 0; index < left->ArgumentCount(); ++index) {
+        const IrValue* first = left->Argument(index);
+        const IrValue* second = right->Argument(index);
+        if (first == nullptr || second == nullptr || !SameAddressValue(first->Resolve(), second->Resolve(), depth + 1u)) return false;
+    }
+    return true;
+}
+
 bool WritesMemory(IrOpcode opcode) {
     const auto buffer = BufferAccessOf(opcode);
     const auto shared = SharedAccessOf(opcode);
@@ -231,7 +244,7 @@ std::vector<std::pair<const IrValue*, std::uint32_t>> AdjacentBdaLoads(SpirvValu
         for (std::size_t index = 0; index < inst.ArgumentCount(); ++index) {
             const IrValue* left = inst.Argument(index);
             const IrValue* right = other->Argument(index);
-            if (left == nullptr || right == nullptr || left->Resolve() != right->Resolve()) sameArguments = false;
+            if (left == nullptr || right == nullptr || !SameAddressValue(left->Resolve(), right->Resolve())) sameArguments = false;
         }
         const auto delta = otherMemory.offset - mem.offset;
         if (!sameArguments || delta == 0u || delta > 12u || (delta & 3u) != 0u || (taken & (1u << (delta / 4u))) != 0u) continue;
