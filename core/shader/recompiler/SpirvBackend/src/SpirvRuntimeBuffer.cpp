@@ -253,6 +253,52 @@ std::array<std::uint32_t, 4> storeValues(SpirvEmitterState& state, std::uint32_t
     return result;
 }
 
+std::array<std::uint32_t, 4> gatherDwords(SpirvValueEmitContext& context, const IrValue& instruction, const std::array<std::uint32_t, 4>& guests, const std::array<std::uint32_t, 4>& conditions, std::uint32_t count) {
+    auto& state = context.state;
+    const auto u32 = TypeU32(state);
+    const auto boolean = TypeBool(state);
+    const auto u64 = TypeScalarU64(state);
+    const auto vector = TypeU32Composite(state, count);
+    const auto before = state.module.AllocateId();
+    const auto header = state.module.AllocateId();
+    const auto body = state.module.AllocateId();
+    const auto continuation = state.module.AllocateId();
+    const auto merge = state.module.AllocateId();
+    state.module.AddFunction(spv::OpBranch, before);
+    EmitLabel(state, before);
+    state.module.AddFunction(spv::OpBranch, header);
+    EmitLabel(state, header);
+    const auto component = state.module.AllocateId();
+    const auto gathered = state.module.AllocateId();
+    const auto nextComponent = state.module.AllocateId();
+    const auto nextGathered = state.module.AllocateId();
+    state.module.AddFunction(spv::OpPhi, u32, component, ConstantU32(state, 0u), before, nextComponent, continuation);
+    state.module.AddFunction(spv::OpPhi, vector, gathered, ConstantU32CompositeZero(state, count), before, nextGathered, continuation);
+    state.module.AddFunction(spv::OpLoopMerge, merge, continuation, spv::LoopControlMaskNone);
+    state.module.AddFunction(spv::OpBranchConditional, Binary(state, spv::OpULessThan, boolean, component, ConstantU32(state, count)), body, merge);
+    EmitLabel(state, body);
+    auto guest = guests[count - 1u];
+    auto condition = conditions[count - 1u];
+    for (std::uint32_t index = count - 1u; index-- > 0u;) {
+        const auto selected = Binary(state, spv::OpIEqual, boolean, component, ConstantU32(state, index));
+        guest = Select(state, u64, selected, guests[index], guest);
+        condition = Select(state, boolean, selected, conditions[index], condition);
+    }
+    const auto read = EmitValueOrZeroIfCondition(state, condition, [&] { return readBuffer(context, instruction, guest, 32u); });
+    state.module.AddFunction(spv::OpVectorInsertDynamic, vector, nextGathered, gathered, read, component);
+    state.module.AddFunction(spv::OpBranch, continuation);
+    EmitLabel(state, continuation);
+    state.module.AddFunction(spv::OpIAdd, u32, nextComponent, component, ConstantU32(state, 1u));
+    state.module.AddFunction(spv::OpBranch, header);
+    EmitLabel(state, merge);
+    std::array<std::uint32_t, 4> values{};
+    for (std::uint32_t index = 0; index < count; ++index) {
+        values[index] = state.module.AllocateId();
+        state.module.AddFunction(spv::OpCompositeExtract, u32, values[index], gathered, index);
+    }
+    return values;
+}
+
 std::uint32_t formatted(SpirvValueEmitContext& context, const IrValue& instruction, const RuntimeDescriptor& resource, const SpirvBufferFormatInfo& info, std::uint32_t components, bool store, std::uint32_t data) {
     auto& state = context.state;
     const auto& memory = context.Memory(instruction);
@@ -294,7 +340,21 @@ std::uint32_t formatted(SpirvValueEmitContext& context, const IrValue& instructi
         });
         return ConstantU32(state, 0u);
     }
-    for (std::uint32_t component = 0; component < info.componentCount; ++component) {
+    bool dwordComponents = memory.gpuDescriptor && !info.packedBitfield && info.componentCount > 1u;
+    for (std::uint32_t component = 0; component < info.componentCount; ++component) dwordComponents = dwordComponents && info.componentBits[component] == 32u;
+    if (dwordComponents) {
+        std::array<std::uint32_t, 4> guests{};
+        std::array<std::uint32_t, 4> conditions{};
+        for (std::uint32_t component = 0; component < info.componentCount; ++component) {
+            guests[component] = addresses[component].guest;
+            conditions[component] = both(state, inBounds, required[component]);
+        }
+        const auto raw = gatherDwords(context, instruction, guests, conditions, info.componentCount);
+        for (std::uint32_t component = 0; component < info.componentCount; ++component) {
+            values[component] = Select(state, u32, conditions[component], memory.d16 ? EmitD16FormatComponent(state, info, component, raw[component]) : NormalizeFormatComponent(state, info, component, raw[component]), ConstantU32(state, 0u));
+        }
+    }
+    for (std::uint32_t component = 0; !dwordComponents && component < info.componentCount; ++component) {
         values[component] = EmitValueOrZeroIfCondition(state, both(state, inBounds, required[component]), [&] {
             const auto bits = info.componentBits[component];
             auto raw = readBuffer(context, instruction, addresses[component].guest, info.packedBitfield ? 32u : bits);
@@ -542,44 +602,14 @@ std::uint32_t EmitRuntimeBufferLoad(SpirvValueEmitContext& context, const IrValu
         const auto readComponents = [&] {
             std::array<std::uint32_t, 4> values{};
             if (memory.gpuDescriptor && memory.dataBits == 32u && components > 1u) {
-                const auto u32 = TypeU32(state);
-                const auto boolean = TypeBool(state);
-                const auto u64 = TypeScalarU64(state);
-                std::array<RuntimeAddress, 4> accesses{};
-                for (std::uint32_t component = 0; component < components; ++component) accesses[component] = address(context, instruction, resource, component * 4u, 4u);
-                const auto before = state.module.AllocateId();
-                const auto header = state.module.AllocateId();
-                const auto body = state.module.AllocateId();
-                const auto continuation = state.module.AllocateId();
-                const auto merge = state.module.AllocateId();
-                state.module.AddFunction(spv::OpBranch, before);
-                EmitLabel(state, before);
-                state.module.AddFunction(spv::OpBranch, header);
-                EmitLabel(state, header);
-                const auto component = state.module.AllocateId();
-                const auto gathered = state.module.AllocateId();
-                const auto nextComponent = state.module.AllocateId();
-                const auto nextGathered = state.module.AllocateId();
-                state.module.AddFunction(spv::OpPhi, u32, component, ConstantU32(state, 0u), before, nextComponent, continuation);
-                state.module.AddFunction(spv::OpPhi, type, gathered, zero, before, nextGathered, continuation);
-                state.module.AddFunction(spv::OpLoopMerge, merge, continuation, spv::LoopControlMaskNone);
-                state.module.AddFunction(spv::OpBranchConditional, Binary(state, spv::OpULessThan, boolean, component, ConstantU32(state, components)), body, merge);
-                EmitLabel(state, body);
-                auto guest = accesses[components - 1u].guest;
-                auto inBounds = accesses[components - 1u].inBounds;
-                for (std::uint32_t index = components - 1u; index-- > 0u;) {
-                    const auto selected = Binary(state, spv::OpIEqual, boolean, component, ConstantU32(state, index));
-                    guest = Select(state, u64, selected, accesses[index].guest, guest);
-                    inBounds = Select(state, boolean, selected, accesses[index].inBounds, inBounds);
+                std::array<std::uint32_t, 4> guests{};
+                std::array<std::uint32_t, 4> conditions{};
+                for (std::uint32_t component = 0; component < components; ++component) {
+                    const auto access = address(context, instruction, resource, component * 4u, 4u);
+                    guests[component] = access.guest;
+                    conditions[component] = access.inBounds;
                 }
-                const auto read = EmitValueOrZeroIfCondition(state, inBounds, [&] { return readBuffer(context, instruction, guest, 32u); });
-                state.module.AddFunction(spv::OpVectorInsertDynamic, type, nextGathered, gathered, read, component);
-                state.module.AddFunction(spv::OpBranch, continuation);
-                EmitLabel(state, continuation);
-                state.module.AddFunction(spv::OpIAdd, u32, nextComponent, component, ConstantU32(state, 1u));
-                state.module.AddFunction(spv::OpBranch, header);
-                EmitLabel(state, merge);
-                return gathered;
+                return composite(state, components, gatherDwords(context, instruction, guests, conditions, components));
             }
             for (std::uint32_t component = 0; component < components; ++component) {
                 const auto access = address(context, instruction, resource, component * 4u, memory.dataBits / 8u);
