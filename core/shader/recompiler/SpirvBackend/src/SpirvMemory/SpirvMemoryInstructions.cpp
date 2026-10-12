@@ -202,6 +202,15 @@ std::uint32_t GuestAddress(SpirvValueEmitContext& ctx, const IrValue& inst, cons
     return AddBdaImmediate(ctx, inst, address, immediate);
 }
 
+bool WritesMemory(IrOpcode opcode) {
+    const auto buffer = BufferAccessOf(opcode);
+    const auto shared = SharedAccessOf(opcode);
+    const auto address = AddressOpcodeInfoOf(opcode).access;
+    const auto image = ImageOpcodeInfoOf(opcode).access;
+    return buffer == BufferAccess::Write || buffer == BufferAccess::Atomic || (shared != SharedAccess::None && shared != SharedAccess::Read) || address == AddressAccess::Write || address == AddressAccess::Atomic ||
+        image == ImageAccess::Write || image == ImageAccess::Atomic || opcode == IrOpcode::Barrier || opcode == IrOpcode::StoreVectorWindow;
+}
+
 std::vector<std::pair<const IrValue*, std::uint32_t>> AdjacentBdaLoads(SpirvValueEmitContext& ctx, const IrValue& inst, const MemoryInfo& mem) {
     std::vector<std::pair<const IrValue*, std::uint32_t>> members;
     const IrBlock* block = inst.Parent();
@@ -213,7 +222,7 @@ std::vector<std::pair<const IrValue*, std::uint32_t>> AdjacentBdaLoads(SpirvValu
     for (++next; next != instructions.end(); ++next) {
         const IrValue* other = *next;
         if (other->Opcode() != inst.Opcode()) {
-            if (other->MayHaveSideEffects()) break;
+            if (WritesMemory(other->Opcode())) break;
             continue;
         }
         const auto& otherMemory = ctx.Memory(*other);
