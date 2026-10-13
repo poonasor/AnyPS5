@@ -4685,6 +4685,46 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
                 if (!covers(entry)) entry = nullptr;
                 runImport = entry != nullptr;
             }
+            static const bool experimentSplitCopies = std::getenv("APS5_EXPERIMENT_SPLIT_COPIES") != nullptr;
+            region.copyPieces.clear();
+            bool splitCopy = false;
+            if (experimentSplitCopies && entry == nullptr && recorder != nullptr && gpuCopiesEnabled() && !region.sparse && (region.hostBacked || region.writable) && bytes <= (64ull << 20u)) {
+                std::vector<Region::CopyPiece> pieces;
+                for (auto address = region.begin; address < region.end;) {
+                    const HostImport* piece = findImport(state, address, address + 1);
+                    if (piece == nullptr && runCovers(importRanges(), address, address + 1)) piece = importAllocation(context, state, address, importRanges());
+                    if (piece == nullptr || piece->buffer == VK_NULL_HANDLE) {
+                        pieces.clear();
+                        break;
+                    }
+                    pieces.push_back({piece->buffer, piece->base, piece->base + piece->bytes});
+                    address = piece->base + piece->bytes;
+                }
+                splitCopy = pieces.size() > 1;
+                for (const auto& piece : pieces) {
+                    const auto* current = findImport(state, piece.base, piece.base + 1);
+                    if (current == nullptr || current->buffer != piece.buffer || current->base != piece.base) splitCopy = false;
+                }
+                if (splitCopy) {
+                    static std::atomic<std::uint64_t> splitCopies{0};
+                    if ((splitCopies.fetch_add(1, std::memory_order_relaxed) & 0x3ffu) == 0) std::fprintf(stderr, "[splitcopy] %llu regions copied from several imports; latest 0x%llx+0x%llx in %zu pieces\n", static_cast<unsigned long long>(splitCopies.load(std::memory_order_relaxed)), static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(bytes), pieces.size());
+                    region.deviceLocal = false;
+                    region.buffer.reset();
+                    region.copySource = pieces.front().buffer;
+                    region.copySourceBase = pieces.front().base;
+                    region.copyPieces = std::move(pieces);
+                }
+            }
+            static const bool experimentTraceNoImport = std::getenv("APS5_EXPERIMENT_TRACE_NO_IMPORT") != nullptr;
+            if (experimentTraceNoImport && entry == nullptr && bytes >= (1u << 20u)) {
+                static std::set<std::uint64_t> traced;
+                if (traced.size() < 48 && traced.insert(region.begin >> 16u).second) {
+                    const auto run = importRun(importRanges(), region.begin);
+                    const auto index = leasedIndexContaining(importRanges(), region.begin);
+                    const auto& ranges = importRanges();
+                    std::fprintf(stderr, "[noimport] region 0x%llx+0x%llx writable=%d hostBacked=%d sparse=%d: run 0x%llx+0x%llx (%zu ranges), covers %d, failed-entry %d, alignment 0x%llx, containing range %s 0x%llx+0x%llx, next range 0x%llx+0x%llx, flags rwg %d%d%d / %d%d%d, window 0x%llx, unaliased %d\n", static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(bytes), region.writable ? 1 : 0, region.hostBacked ? 1 : 0, region.sparse ? 1 : 0, static_cast<unsigned long long>(run.base), static_cast<unsigned long long>(run.bytes), run.ranges.size(), run.ranges.empty() ? 0 : (region.end <= run.base + run.bytes ? 1 : 0), state.failed.contains(run.base) ? 1 : 0, static_cast<unsigned long long>(context.hostImportAlignment), index == ranges.size() ? "none" : "at", static_cast<unsigned long long>(index == ranges.size() ? 0 : ranges[index]->address), static_cast<unsigned long long>(index == ranges.size() ? 0 : ranges[index]->bytes), static_cast<unsigned long long>(index + 1 < ranges.size() ? ranges[index + 1]->address : 0), static_cast<unsigned long long>(index + 1 < ranges.size() ? ranges[index + 1]->bytes : 0), index < ranges.size() && ranges[index]->readable ? 1 : 0, index < ranges.size() && ranges[index]->writable ? 1 : 0, index < ranges.size() && ranges[index]->gpu ? 1 : 0, index + 1 < ranges.size() && ranges[index + 1]->readable ? 1 : 0, index + 1 < ranges.size() && ranges[index + 1]->writable ? 1 : 0, index + 1 < ranges.size() && ranges[index + 1]->gpu ? 1 : 0, static_cast<unsigned long long>(importWindow.load()), static_cast<int>(state.unaliasedSpans.size()));
+                }
+            }
             // A staged region (see stagingEligible) is copied out of the import even when aligned;
             // without a recorder to record the copies it binds in place like any other.
             const bool staged = recorder != nullptr && stagingEligible(region, addressable);
@@ -4706,6 +4746,7 @@ void GuestBufferMemory::UploadFinish(bool addressable) {
                 region.copySource = entry->buffer;
                 region.copySourceBase = entry->base - entry->lead;
             }
+            if (splitCopy) copyOnGpu = true;
         }
         if (region.direct != nullptr) {
             // The GPU reads this range in place, so storage results pending in it must be stored first
@@ -4919,7 +4960,15 @@ void GuestBufferMemory::recordGpuCopies(std::span<Region* const> copies, bool ad
                 expected.assign(snapshotBytes.begin(), snapshotBytes.end());
             }
         }
-        CopyBuffer(context, commands, copySource, copyOffset, region->buffer->Handle(), 0, bytes);
+        if (inputSnapshot == nullptr && !region->copyPieces.empty()) {
+            for (const auto& piece : region->copyPieces) {
+                const auto from = std::max(piece.base, region->begin);
+                const auto to = std::min(piece.end, region->end);
+                if (from < to) CopyBuffer(context, commands, piece.buffer, from - piece.base, region->buffer->Handle(), from - region->begin, to - from);
+            }
+        } else {
+            CopyBuffer(context, commands, copySource, copyOffset, region->buffer->Handle(), 0, bytes);
+        }
         if (!expected.empty()) {
             auto readback = std::make_shared<Buffer>(context, expected.size(), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
             RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
@@ -5002,7 +5051,15 @@ void GuestBufferMemory::RecordCopyBacks(Recorder& recorder) {
             }
             // Exactly the sub-range the shader may write, in place in the import: what the shader
             // would have stored there itself had the range been bindable.
-            CopyBuffer(context, commands, region.buffer->Handle(), from - region.begin, region.copySource, from - region.copySourceBase, to - from);
+            if (!region.copyPieces.empty()) {
+                for (const auto& piece : region.copyPieces) {
+                    const auto pieceFrom = std::max(piece.base, from);
+                    const auto pieceTo = std::min(piece.end, to);
+                    if (pieceFrom < pieceTo) CopyBuffer(context, commands, region.buffer->Handle(), pieceFrom - region.begin, piece.buffer, pieceFrom - piece.base, pieceTo - pieceFrom);
+                }
+            } else {
+                CopyBuffer(context, commands, region.buffer->Handle(), from - region.begin, region.copySource, from - region.copySourceBase, to - from);
+            }
             copiedBytes += to - from;
             recorder.Keep(region.buffer);
             if (profile) {

@@ -409,6 +409,14 @@ private:
         bool gpuCopy = false;
         VkBuffer copySource = VK_NULL_HANDLE;
         std::uint64_t copySourceBase = 0;
+        // APS5_EXPERIMENT_SPLIT_COPIES: the region spans several adjacent imports; each piece is the
+        // import serving guest addresses [base, end). Empty when `copySource` serves the whole region.
+        struct CopyPiece {
+            VkBuffer buffer = VK_NULL_HANDLE;
+            std::uint64_t base = 0;
+            std::uint64_t end = 0;
+        };
+        std::vector<CopyPiece> copyPieces;
         bool copiedBack = false;
         // An element the shader updates atomically lies inside (AddWritable's `atomic`).
         bool atomic = false;
