@@ -3996,7 +3996,7 @@ void StorageTexture::DumpAllLive() {
         auto& live = Live();
         std::lock_guard lock(live.mutex);
         for (auto* texture : live.textures) {
-            if (texture->released || texture->image == VK_NULL_HANDLE || texture->descriptor.width < 128 || texture->descriptor.height < 128) continue;
+            if (texture->released || texture->image == VK_NULL_HANDLE || (texture->descriptor.width > 64 && texture->descriptor.width < 128)) continue;
             if (auto alive = texture->weak_from_this().lock()) textures.push_back(std::move(alive));
         }
     }
@@ -4015,6 +4015,14 @@ void StorageTexture::DumpAllLive() {
         context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(batch.Handle(), texture->image, VK_IMAGE_LAYOUT_GENERAL, dump.Handle(), 1, &region);
         RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
         batch.SubmitAndWait();
+        if (texture->descriptor.width <= 64 && texture->descriptor.height <= 64) {
+            const auto* words = reinterpret_cast<const std::uint32_t*>(dump.Bytes().data());
+            const auto count = std::min<std::size_t>(dump.Bytes().size() / 4, 8);
+            std::fprintf(stderr, "[dumpall] small 0x%llx %ux%u vk %d:", static_cast<unsigned long long>(texture->descriptor.baseAddress), texture->descriptor.width, texture->descriptor.height, static_cast<int>(texture->storageFormat));
+            for (std::size_t index = 0; index < count; ++index) std::fprintf(stderr, " %08x", words[index]);
+            std::fprintf(stderr, "\n");
+            continue;
+        }
         char name[64];
         std::snprintf(name, sizeof(name), "storage_%03d_%llx.raw", serial++, static_cast<unsigned long long>(texture->descriptor.baseAddress));
         if (std::FILE* file = std::fopen(name, "wb")) {
