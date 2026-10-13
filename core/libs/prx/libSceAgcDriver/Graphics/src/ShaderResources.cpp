@@ -4234,7 +4234,7 @@ std::string ShaderResources::Describe() const {
         }
     }
     // APS5_TRACE_DISPATCH_IO=2 also lists the words of small buffers (constants).
-    static const bool words = [] { const char* value = std::getenv("APS5_TRACE_DISPATCH_IO"); return value != nullptr && value[0] == '2'; }();
+    static const bool words = [] { const char* value = std::getenv("APS5_TRACE_DISPATCH_IO"); return (value != nullptr && value[0] == '2') || std::getenv("APS5_EXPERIMENT_TRACE_WORDS") != nullptr; }();
     const auto appendWords = [&](const std::uint32_t* data, std::size_t bytes) {
         if (!words || bytes > 0x200) return;
         text += " [";
