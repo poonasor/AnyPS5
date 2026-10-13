@@ -2079,6 +2079,8 @@ bool StorageTexture::Refresh() {
     handedOver.clear();
     handedUnits.clear();
     const auto handOverKeys = alias == nullptr ? clearHandOver() : std::nullopt;
+    static const bool experimentDropReused = std::getenv("APS5_EXPERIMENT_DROP_REUSED") != nullptr;
+    if (experimentDropReused) static_cast<void>(DiscardPendingInside(descriptor.baseAddress, static_cast<std::size_t>(guestBytes)));
     const bool flushed = !handOverKeys.has_value() && FlushPending(descriptor.baseAddress, static_cast<std::size_t>(guestBytes), alias.get(), "storage refresh", PublishScope::None);
     if (profile && flushed) start = LookupOutcomes::Add(LookupOutcomes::PendingFlush, start);
     // `original` holds the guest bytes the image was last uploaded from or written back as; while the
@@ -2303,7 +2305,10 @@ bool StorageTexture::Refresh() {
         }
         refreshGeneration();
     }
-    if (std::any_of(changed.begin(), changed.end(), [](bool selected) { return selected; })) {
+    static const bool experimentSkipStoreUploads = std::getenv("APS5_EXPERIMENT_SKIP_STORE_UPLOADS") != nullptr;
+    if (experimentSkipStoreUploads && !keysChanged && !cpuWrote && generation != 0) {
+        uploadedKeys = keys;
+    } else if (std::any_of(changed.begin(), changed.end(), [](bool selected) { return selected; })) {
         uploadReason = keysChanged ? "keys" : cpuWrote ? "cpu" : generation == 0 ? "untracked" : flushed ? "flushed" : "store";
         upload(&changed);
     } else {
