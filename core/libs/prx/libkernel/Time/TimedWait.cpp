@@ -424,6 +424,8 @@ std::uint64_t NowNanos() {
 }
 
 std::uint64_t DeadlineNanos(std::uint64_t microseconds) {
+    static const std::uint64_t secondScale = [] { const char* text = std::getenv("APS5_EXPERIMENT_SECOND_WAIT_SCALE"); return text ? std::strtoull(text, nullptr, 10) : 1ULL; }();
+    if (microseconds >= 500000ULL && microseconds <= 5000000ULL) microseconds *= secondScale;
     const std::uint64_t now = NowNanos();
     if (microseconds > (std::numeric_limits<std::uint64_t>::max() - now) / 1000ULL) return std::numeric_limits<std::uint64_t>::max();
     return now + microseconds * 1000ULL;

@@ -216,6 +216,7 @@ public:
     static std::size_t StoreSmallPending(const char* reason);
     static bool AnyPending();
     static void FlushDumpSelected(const char* reason);
+    static void DumpAllLive();
     static bool StoreAtFlipRequested(const char* value);
     static bool StoreAtLabelRequested(const char* value);
     // See PendingSerial: a change of a surface's source outside the registry (a unit shadow

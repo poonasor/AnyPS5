@@ -77,6 +77,8 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
         phaseMs[DrawRowCapture] -= waited;
         phaseMs[DrawRowCaptureHookWaits] += waited;
     }
+    static const std::uint64_t experimentDumpProgram = [] { const char* text = std::getenv("APS5_EXPERIMENT_DUMP_PROGRAM"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
+    if (experimentDumpProgram != 0 && program.binary.codeAddress == experimentDumpProgram) static_cast<void>(dumpRequest(program.binary.codeAddress, request));
     if (dumpTarget != 0) {
 
         const auto slot0 = (static_cast<std::uint64_t>(readRegister(queue.context, 0x390)) << 40u) | (static_cast<std::uint64_t>(readRegister(queue.context, 0x318)) << 8u);

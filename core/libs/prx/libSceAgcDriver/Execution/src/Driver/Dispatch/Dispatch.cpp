@@ -357,7 +357,17 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             if (traceCapSync()) traceCapture("dispatch-capture", address, submission.queue, captured, Graphics::Recorder::ThreadWaitedMs() - waitedBefore);
             captureMs += phaseTiming.Elapsed();
             phaseTiming.Phase(PhaseCapture);
-            if (dumpShaders) static_cast<void>(dumpRequest(address, request));
+            static const std::vector<std::uint64_t> experimentDumpDispatch = [] {
+                std::vector<std::uint64_t> parsed;
+                const char* text = std::getenv("APS5_EXPERIMENT_DUMP_DISPATCH");
+                while (text != nullptr && *text != 0) {
+                    char* end = nullptr;
+                    parsed.push_back(std::strtoull(text, &end, 16));
+                    text = *end == ',' ? end + 1 : nullptr;
+                }
+                return parsed;
+            }();
+            if (dumpShaders || std::find(experimentDumpDispatch.begin(), experimentDumpDispatch.end(), address) != experimentDumpDispatch.end()) static_cast<void>(dumpRequest(address, request));
             const auto started = std::chrono::steady_clock::now();
 
 
@@ -580,6 +590,8 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         phaseTiming.Phase(PhaseNoteWriters);
         auto* const keysRecorder = filledKeys ? Graphics::Recorder::Active() : nullptr;
         const auto keysNoteBefore = keysRecorder != nullptr ? keysRecorder->LastWriteNote(keysFill->base, keysFill->bytes) : 0;
+        static const bool experimentTraceWork = std::getenv("APS5_EXPERIMENT_TRACE_WORK") != nullptr;
+        if (experimentTraceWork) std::fprintf(stderr, "[work] queue 0x%x dispatch 0x%llx groups %u %u %u indirect 0x%llx\n", submission.queue, static_cast<unsigned long long>(address), static_cast<unsigned>(groups[0]), static_cast<unsigned>(groups[1]), static_cast<unsigned>(groups[2]), static_cast<unsigned long long>(indirectArguments));
         try {
             if (recipeHit != nullptr) {
                 VulkanDevice::IndirectOutcome outcome{0, 0};

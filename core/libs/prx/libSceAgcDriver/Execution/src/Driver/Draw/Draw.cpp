@@ -423,6 +423,12 @@ DrawVerdict Driver::draw(QueueState& queue, std::span<const std::uint32_t> packe
         pushCursorBytes += static_cast<std::uint32_t>(result.pushConstants.size());
     }
 
+    static const bool experimentTraceWork = std::getenv("APS5_EXPERIMENT_TRACE_WORK") != nullptr;
+    if (experimentTraceWork) {
+        std::fprintf(stderr, "[work] queue 0x%x draw indices %u instances %u target %ux%u programs", submission.queue, drawParameters.indexCount, drawParameters.instanceCount, graphics.color.extent.width, graphics.color.extent.height);
+        for (const auto& program : programs) std::fprintf(stderr, " 0x%llx", static_cast<unsigned long long>(program.binary.codeAddress));
+        std::fprintf(stderr, "\n");
+    }
     if (stageDataVerified != 0) {
         std::lock_guard cacheLock(drawCacheMutex);
         drawEntryCounters.stageDataVerified += stageDataVerified;

@@ -3593,6 +3593,21 @@ void Recorder::Submit() {
     batch->submitted = true;
     batch->serial = ++submissions;
     batch->submittedAt = std::chrono::steady_clock::now();
+    static const bool experimentTraceWork = std::getenv("APS5_EXPERIMENT_TRACE_WORK") != nullptr;
+    if (experimentTraceWork) {
+        std::uint64_t oldest = 0;
+        double oldestMs = 0;
+        std::size_t unsignaled = 0;
+        for (const auto& flying : inFlight) {
+            if (fenceStatus(flying->fence) == VK_SUCCESS) continue;
+            if (oldest == 0) {
+                oldest = flying->serial;
+                oldestMs = std::chrono::duration<double, std::milli>(batch->submittedAt - flying->submittedAt).count();
+            }
+            ++unsignaled;
+        }
+        std::fprintf(stderr, "[work] submit serial %llu; %zu in flight, %zu unsignaled, oldest unsignaled serial %llu aged %.0f ms\n", static_cast<unsigned long long>(batch->serial), inFlight.size(), unsignaled, static_cast<unsigned long long>(oldest), oldestMs);
+    }
     if (DrawProfiled()) {
         const auto us = std::chrono::duration<double, std::micro>(batch->submittedAt - submitStart).count();
         ++submitCount;

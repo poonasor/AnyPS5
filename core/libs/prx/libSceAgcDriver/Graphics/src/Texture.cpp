@@ -30,6 +30,7 @@
 #include <stdexcept>
 #include <vector>
 #include <atomic>
+#include <filesystem>
 #include <mutex>
 #include <map>
 #include <limits>
@@ -3963,7 +3964,15 @@ const StorageDumpSelector& StorageDumpSelection() {
     return selector;
 }
 
+std::atomic<bool> dumpAllArmed{false};
+
+bool DumpAllEnabled() {
+    static const bool enabled = std::getenv("APS5_EXPERIMENT_DUMP_ALL_STORAGE") != nullptr;
+    return enabled;
+}
+
 bool StorageDumpSelects(const GuestTextureResource& descriptor) {
+    if (dumpAllArmed.load(std::memory_order_relaxed)) return descriptor.width >= 128 && descriptor.height >= 128;
     const auto& selector = StorageDumpSelection();
     if (selector.address != 0) return descriptor.baseAddress == selector.address;
     return selector.width != 0 && descriptor.width == selector.width && descriptor.height == selector.height && descriptor.depthOrLastArray + 1 == selector.layers && (selector.anyFormat || descriptor.format == selector.format);
@@ -3971,9 +3980,66 @@ bool StorageDumpSelects(const GuestTextureResource& descriptor) {
 
 }
 
+void StorageTexture::DumpAllLive() {
+    const auto texelBytes = [](VkFormat format) -> std::uint32_t {
+        switch (static_cast<int>(format)) {
+            case 9: return 1;
+            case 16: case 70: case 76: case 124: return 2;
+            case 37: case 43: case 44: case 50: case 58: case 64: case 77: case 83: case 98: case 100: case 122: case 126: return 4;
+            case 91: case 97: case 103: return 8;
+            case 109: return 16;
+            default: return 0;
+        }
+    };
+    std::vector<std::shared_ptr<StorageTexture>> textures;
+    {
+        auto& live = Live();
+        std::lock_guard lock(live.mutex);
+        for (auto* texture : live.textures) {
+            if (texture->released || texture->image == VK_NULL_HANDLE || texture->descriptor.width < 128 || texture->descriptor.height < 128) continue;
+            if (auto alive = texture->weak_from_this().lock()) textures.push_back(std::move(alive));
+        }
+    }
+    std::lock_guard gpu(GuestMemory::GpuMutex());
+    static int serial = 0;
+    for (const auto& texture : textures) {
+        const auto bytes = texelBytes(texture->storageFormat);
+        const auto& context = texture->context;
+        std::fprintf(stderr, "[dumpall] 0x%llx %ux%u last %u dim %u guest format %u vk %d dirty %d%s\n", static_cast<unsigned long long>(texture->descriptor.baseAddress), texture->descriptor.width, texture->descriptor.height, texture->descriptor.depthOrLastArray, static_cast<unsigned>(texture->descriptor.dimension), static_cast<unsigned>(texture->descriptor.format), static_cast<int>(texture->storageFormat), texture->dirty ? 1 : 0, bytes == 0 ? " (not dumped)" : "");
+        if (bytes == 0) continue;
+        Buffer dump(context, static_cast<std::size_t>(texture->descriptor.width) * texture->descriptor.height * bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+        CommandBatch batch(context);
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {texture->descriptor.width, texture->descriptor.height, 1};
+        context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(batch.Handle(), texture->image, VK_IMAGE_LAYOUT_GENERAL, dump.Handle(), 1, &region);
+        RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+        batch.SubmitAndWait();
+        char name[64];
+        std::snprintf(name, sizeof(name), "storage_%03d_%llx.raw", serial++, static_cast<unsigned long long>(texture->descriptor.baseAddress));
+        if (std::FILE* file = std::fopen(name, "wb")) {
+            const std::uint32_t header[3] = {texture->descriptor.width, texture->descriptor.height, static_cast<std::uint32_t>(texture->storageFormat)};
+            std::fwrite(header, sizeof(header), 1, file);
+            std::fwrite(dump.Bytes().data(), 1, dump.Bytes().size(), file);
+            std::fclose(file);
+        }
+    }
+    std::fprintf(stderr, "[dumpall] %zu live images visited\n", textures.size());
+}
+
 void StorageTexture::FlushDumpSelected(const char* reason) {
     const auto& selector = StorageDumpSelection();
-    if (selector.address == 0 && selector.width == 0) return;
+    if (DumpAllEnabled()) {
+        std::error_code ignored;
+        if (std::filesystem::remove("dump-targets.now", ignored)) {
+            DumpAllLive();
+            return;
+        }
+    }
+    struct Disarm {
+        ~Disarm() { dumpAllArmed.store(false, std::memory_order_relaxed); }
+    } disarm;
+    if (selector.address == 0 && selector.width == 0 && !dumpAllArmed.load(std::memory_order_relaxed)) return;
     std::vector<std::pair<std::uint64_t, std::size_t>> ranges;
     {
         auto& pending = Pending();
@@ -5517,7 +5583,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     const bool dumpSelected = StorageDumpSelects(descriptor);
     static int dumps = 0;
     std::unique_ptr<Buffer> dump;
-    if (dumpSelected && dumps < 8) {
+    if (dumpSelected && (dumps < 8 || dumpAllArmed.load(std::memory_order_relaxed))) {
         dump = std::make_unique<Buffer>(context, static_cast<std::size_t>(mips[0].linearSize * arrayLayers), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
         for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
@@ -5541,6 +5607,7 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     if (dump) {
         char name[64];
         std::snprintf(name, sizeof(name), "storage_%llx_%d.raw", static_cast<unsigned long long>(descriptor.baseAddress), dumps++);
+        if (dumpAllArmed.load(std::memory_order_relaxed)) std::fprintf(stderr, "[dumpall] %s %ux%u layers %u guest format %u vk %d\n", name, descriptor.width, descriptor.height, arrayLayers, static_cast<unsigned>(descriptor.format), static_cast<int>(storageFormat));
         if (std::FILE* file = std::fopen(name, "wb")) {
             const std::uint32_t header[3] = {mips[0].pitchBytes / static_cast<std::uint32_t>(elementBytes), mips[0].height, static_cast<std::uint32_t>(storageFormat)};
             std::fwrite(header, sizeof(header), 1, file);

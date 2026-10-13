@@ -49,6 +49,8 @@
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libc/include/General.hpp"
 #ifdef _WIN32
+#include <map>
+#include <filesystem>
 #include <windows.h>
 #endif
 #include <atomic>
@@ -1420,7 +1422,10 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         constexpr bool windows = false;
 #endif
         state->drawInputsInPlace = std::getenv("APS5_NO_DRAW_INPUTS_IN_PLACE") == nullptr && (std::getenv("APS5_DRAW_INPUTS_IN_PLACE") != nullptr || DrawInputsInPlaceUsable(driverProperties.driverID, windows));
-        if (!compileOnly) Graphics::SetHostImportWindow(8ull << 20u);
+        if (!compileOnly) {
+            const char* experimentWindow = std::getenv("APS5_EXPERIMENT_IMPORT_WINDOW_MIB");
+            Graphics::SetHostImportWindow((experimentWindow ? std::strtoull(experimentWindow, nullptr, 10) : 8ull) << 20u);
+        }
 #ifdef _WIN32
         // Imported pages are locked; locking is bounded by the process working-set minimum.
         if (const char* value = std::getenv("APS5_WORKING_SET_MIB"); value != nullptr && !compileOnly) {
@@ -3157,7 +3162,56 @@ FrameDumps& Dumps() {
 
 }
 
+namespace {
+
+struct TargetTrace {
+    struct Entry {
+        std::uint32_t order = 0, draws = 0, width = 0, height = 0;
+        int format = 0;
+        std::uint64_t indices = 0;
+    };
+    std::mutex mutex;
+    std::map<std::uint64_t, Entry> targets;
+    bool armed = false;
+    std::atomic<bool> dispatches{false};
+    static bool Enabled() {
+        static const bool enabled = std::getenv("APS5_EXPERIMENT_TRACE_TARGETS") != nullptr;
+        return enabled;
+    }
+    static TargetTrace& Get() {
+        static TargetTrace trace;
+        return trace;
+    }
+    void Flip() {
+        std::lock_guard lock(mutex);
+        if (armed) {
+            std::vector<std::pair<std::uint64_t, Entry>> ordered(targets.begin(), targets.end());
+            std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) { return left.second.order < right.second.order; });
+            for (const auto& [address, entry] : ordered) std::fprintf(stderr, "[targets] 0x%llx %ux%u vk %d: %u draws, %llu indices\n", static_cast<unsigned long long>(address), entry.width, entry.height, entry.format, entry.draws, static_cast<unsigned long long>(entry.indices));
+            std::fprintf(stderr, "[targets] %zu targets in the frame\n", ordered.size());
+            armed = false;
+        }
+        std::error_code ignored;
+        if (std::filesystem::remove("trace-targets.now", ignored)) armed = true;
+        dispatches.store(armed, std::memory_order_relaxed);
+        targets.clear();
+    }
+    void Note(std::uint64_t address, std::uint32_t width, std::uint32_t height, int format, std::uint64_t indices) {
+        std::lock_guard lock(mutex);
+        auto [found, inserted] = targets.try_emplace(address);
+        if (inserted) found->second.order = static_cast<std::uint32_t>(targets.size());
+        found->second.width = width;
+        found->second.height = height;
+        found->second.format = format;
+        ++found->second.draws;
+        found->second.indices += indices;
+    }
+};
+
+}
+
 bool VulkanDevice::PresentDisplayBuffer(const DisplayBuffer& buffer) {
+    if (TargetTrace::Enabled()) TargetTrace::Get().Flip();
     static const bool storeAtFlip = Graphics::StorageTexture::StoreAtFlipRequested(std::getenv("APS5_STORE_AT_FLIP"));
     if (storeAtFlip) Graphics::StorageTexture::FlushAllPending("flip");
     else Graphics::StorageTexture::FlushDumpSelected("flip");
@@ -3919,6 +3973,11 @@ void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParamete
     }
     // Two stdout lines per draw cost ~1.3 ms per frame of the queue-0 worker (part of it under the
     // GPU mutex); APS5_TRACE_DRAWS=1 restores them.
+    if (TargetTrace::Enabled()) {
+        const auto indices = static_cast<std::uint64_t>(draw.indexCount) * std::max<std::uint32_t>(draw.instanceCount, 1u);
+        if (graphics.colors.empty()) TargetTrace::Get().Note(0, graphics.renderExtent.width, graphics.renderExtent.height, 0, indices);
+        for (const auto& color : graphics.colors) TargetTrace::Get().Note(color.address, color.extent.width, color.extent.height, static_cast<int>(color.format), indices);
+    }
     static const bool trace = std::getenv("APS5_TRACE_DRAWS") != nullptr;
     if (trace) APS5_LOG_OUT("VulkanDevice::Draw indices=%u instances=%u indexSize=%u address=0x%llx shaders=%zu colorTarget=%u", draw.indexCount, draw.instanceCount, draw.indexSize, static_cast<unsigned long long>(draw.indexAddress), shaders.size(), static_cast<unsigned>(graphics.hasColorTarget));
     const auto context = graphicsContext();
@@ -4063,7 +4122,7 @@ bool SyncEachDispatch() {
 // Debug aid: APS5_TRACE_DISPATCH_IO prints every dispatch's resources (after write-back when synced).
 bool TraceDispatchIo() {
     static const bool traceIo = std::getenv("APS5_TRACE_DISPATCH_IO") != nullptr;
-    return traceIo;
+    return traceIo || (TargetTrace::Enabled() && TargetTrace::Get().dispatches.load(std::memory_order_relaxed));
 }
 
 void WatchMemory(std::uint64_t programAddress) {
@@ -5369,7 +5428,7 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
         // finishes the recorder up to that batch's serial. Prints the [address-sync] leases line.
         Graphics::CountLeaseOutcome(false, recorder.Submissions() + 1);
     }
-    if (TraceDispatchIo()) std::fprintf(stderr, "[dispatch-io] %s:%s\n", groupsText, resources->Describe().c_str());
+    if (TraceDispatchIo()) std::fprintf(stderr, "[dispatch-io] program 0x%llx %s:%s\n", static_cast<unsigned long long>(programAddress), groupsText, resources->Describe().c_str());
     WatchMemory(programAddress);
     // The recipe for the caller's dispatch-cache variant (design_cpu_final M4, rule R3): only an
     // object the resource cache serves under this content key (reusable: no lease, no copied
@@ -5508,7 +5567,7 @@ RecipeOutcome VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResu
         state->recorder->Sync();
         timer.phase(PhaseSync);
     }
-    if (TraceDispatchIo()) std::fprintf(stderr, "[dispatch-io] %s:%s\n", groupsText, hit->resources->Describe().c_str());
+    if (TraceDispatchIo()) std::fprintf(stderr, "[dispatch-io] program 0x%llx %s:%s\n", static_cast<unsigned long long>(programAddress), groupsText, hit->resources->Describe().c_str());
     WatchMemory(programAddress);
     timer.finish(lookupsBefore, groupsText, indirect);
     if (profile) reportRecipes();
