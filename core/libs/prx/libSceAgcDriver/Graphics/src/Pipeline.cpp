@@ -333,6 +333,20 @@ Pipeline::Pipeline(const Context& context, const State& state, const VertexInput
             VkShaderModuleCreateInfo module{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
             module.codeSize = shader.spirv.size() * sizeof(std::uint32_t);
             module.pCode = shader.spirv.data();
+            {
+                static const char* dumpWords = std::getenv("APS5_EXPERIMENT_DUMP_PIPELINE_SPIRV");
+                if (dumpWords != nullptr && shader.spirv.size() >= std::strtoull(dumpWords, nullptr, 10)) {
+                    std::uint64_t hash = 1469598103934665603ull;
+                    for (const auto word : shader.spirv) hash = (hash ^ word) * 1099511628211ull;
+                    char name[160];
+                    std::snprintf(name, sizeof(name), "pipe-dump/stage%u_%zu_%016llx.spv", static_cast<unsigned>(shaders[i].stage), shader.spirv.size(), static_cast<unsigned long long>(hash));
+                    if (std::FILE* file = std::fopen(name, "wb")) {
+                        std::fwrite(shader.spirv.data(), sizeof(std::uint32_t), shader.spirv.size(), file);
+                        std::fclose(file);
+                    }
+                    std::fprintf(stderr, "[gpu] pipeline stage dumped: %s\n", name);
+                }
+            }
             Check(context.Function<PFN_vkCreateShaderModule>("vkCreateShaderModule")(context.device, &module, nullptr, &_modules[i]), "vkCreateShaderModule graphics");
             const auto stage = VulkanStage(shaders[i].stage);
             stages[i].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;

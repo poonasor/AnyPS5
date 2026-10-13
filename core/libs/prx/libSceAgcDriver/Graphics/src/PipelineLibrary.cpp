@@ -1,5 +1,7 @@
 #include "prx/libSceAgcDriver/Graphics/include/PipelineLibrary.hpp"
 #include "prx/libSceAgcDriver/Execution/include/PerformanceTimer.hpp"
+#include <cstdio>
+#include <chrono>
 #include <array>
 #include <condition_variable>
 #include <cstdlib>
