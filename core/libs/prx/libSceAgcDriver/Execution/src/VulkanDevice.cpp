@@ -3184,6 +3184,30 @@ struct TargetTrace {
     }
     void Flip() {
         std::lock_guard lock(mutex);
+        static const std::uint64_t watch = [] { const char* text = std::getenv("APS5_EXPERIMENT_WATCH_WORDS"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
+        static std::uint64_t flips = 0;
+        ++flips;
+        static const std::uint64_t protectAt = [] { const char* text = std::getenv("APS5_EXPERIMENT_WATCH_PROTECT_FLIP"); return text ? std::strtoull(text, nullptr, 10) : 0ull; }();
+        if (watch != 0 && protectAt != 0 && flips == protectAt) {
+            DWORD previous = 0;
+            const auto ok = VirtualProtect(reinterpret_cast<void*>(watch & ~0xfffull), 0x1000, PAGE_READONLY, &previous);
+            std::fprintf(stderr, "[watch] flip %llu: page of 0x%llx made read-only (%d, was 0x%lx)\n", static_cast<unsigned long long>(flips), static_cast<unsigned long long>(watch), ok ? 1 : 0, previous);
+        }
+        if (watch != 0) {
+            static std::array<std::uint32_t, 12> last{};
+            static bool mapped = false;
+            MEMORY_BASIC_INFORMATION info{};
+            const bool readable = VirtualQuery(reinterpret_cast<const void*>(watch), &info, sizeof(info)) != 0 && info.State == MEM_COMMIT && (info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY)) != 0 && (info.Protect & PAGE_GUARD) == 0;
+            std::array<std::uint32_t, 12> now{};
+            if (readable) std::memcpy(now.data(), reinterpret_cast<const void*>(watch), sizeof(now));
+            if (readable != mapped || now != last) {
+                std::fprintf(stderr, "[watch] flip %llu 0x%llx %s:", static_cast<unsigned long long>(flips), static_cast<unsigned long long>(watch), readable ? "readable" : "unreadable");
+                for (const auto word : now) std::fprintf(stderr, " %08x", word);
+                std::fprintf(stderr, "\n");
+                mapped = readable;
+                last = now;
+            }
+        }
         if (armed) {
             std::vector<std::pair<std::uint64_t, Entry>> ordered(targets.begin(), targets.end());
             std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) { return left.second.order < right.second.order; });
