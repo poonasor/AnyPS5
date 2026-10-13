@@ -579,10 +579,13 @@ std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const s
         return depth;
     }
     const auto depthBitsWidth = words.size() >= 4 ? ShaderRecompiler::DepthBitsTextureWidth(words[1], words[3]) : 0u;
-    if (depthBitsWidth == 32u) {
-        char text[160];
-        std::snprintf(text, sizeof(text), "AGC graphics: 32-bit integer read of the depth-layout texture 0x%llx, which is no depth surface drawn with, is not implemented", static_cast<unsigned long long>(resource.baseAddress));
-        throw std::runtime_error(text);
+    constexpr auto uint32 = static_cast<std::uint32_t>(ShaderRecompiler::IrBufferFormat::Format32UInt);
+    if (depthBitsWidth == 32u && resource.format != uint32) {
+        static std::atomic<int> reports{0};
+        if (reports.fetch_add(1) < 8) std::fprintf(stderr, "[gpu] 32-bit integer read of the depth-layout texture 0x%llx, which is no depth surface drawn with: its texels are read from guest memory as 32-bit integers%c", static_cast<unsigned long long>(resource.baseAddress), 10);
+        auto plain = resource;
+        plain.format = uint32;
+        return cachedTexture(context, words, plain, components, guestBytes, depthCompare);
     }
     constexpr auto unorm16 = static_cast<std::uint32_t>(ShaderRecompiler::IrBufferFormat::Format16UNorm);
     if (depthBitsWidth == 16u && resource.format != unorm16) {
