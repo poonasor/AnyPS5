@@ -146,6 +146,7 @@ std::optional<Graphics::DccKeys> KeysFillMemo(const std::array<std::uint32_t, 4>
         case 0x80: return Graphics::DccKeys::Clear1110;
         case 0xc0: return Graphics::DccKeys::Clear1111;
         case 0x20: return Graphics::DccKeys::ClearRegister;
+        case 0x10: return Graphics::DccKeys::ClearSingle;
         case 0xff: return Graphics::DccKeys::Uncompressed;
         default: return std::nullopt;
     }

@@ -2248,8 +2248,21 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         static const bool residentTargets = std::getenv("APS5_NO_RESIDENT_TARGETS") == nullptr;
         static const bool residentLinear = std::getenv("APS5_NO_RESIDENT_LINEAR") == nullptr;
         const bool linearResident = residentLinear && color.tileMode == ColorTileMode::Linear && ExistingHostImportFor(context, color.address, colorLayout.Bytes()) != nullptr;
-        static const bool experimentNoResidentDcc = std::getenv("APS5_EXPERIMENT_RESIDENT_DCC") == nullptr;
-        if ((binding.gpuTiling || ((color.tileMode != ColorTileMode::Linear || linearResident) && context.detiler != nullptr)) && residentTargets && !(experimentNoResidentDcc && color.dccAddress != 0)) {
+        static const char* residentDccMode = std::getenv("APS5_EXPERIMENT_RESIDENT_DCC");
+        static const bool experimentNoResidentDcc = residentDccMode != nullptr && std::strcmp(residentDccMode, "all") == 0;
+        static const bool experimentSingleOnly = residentDccMode == nullptr || std::strcmp(residentDccMode, "single") == 0;
+        bool copyDcc = experimentNoResidentDcc && color.dccAddress != 0;
+        if (experimentSingleOnly && color.dccAddress != 0) {
+            static std::mutex singleMutex;
+            static std::set<std::uint64_t> singleTargets;
+            std::lock_guard singleLock(singleMutex);
+            if (!singleTargets.contains(color.address) && CurrentDccKeys(color.dccAddress, colorLayout.Bytes()) == DccKeys::ClearSingle) {
+                singleTargets.insert(color.address);
+                std::fprintf(stderr, "[gpu] DCC color target 0x%llx has single-color keys: rendered through the copied path from now on%c", static_cast<unsigned long long>(color.address), 10);
+            }
+            copyDcc = singleTargets.contains(color.address);
+        }
+        if ((binding.gpuTiling || ((color.tileMode != ColorTileMode::Linear || linearResident) && context.detiler != nullptr)) && residentTargets && !copyDcc) {
             // The lookup refreshes the image on every draw (StorageTexture::Refresh: FlushPending,
             // CollectWrites over the target's pages, the DCC key scan of TextureClearKeys, then
             // UnchangedSince). The page walk is skipped while the worker's collect epoch lasts
@@ -2276,6 +2289,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             });
         }
         if (binding.resident != nullptr) {
+            static const std::uint64_t traceResident = [] { const char* text = std::getenv("APS5_EXPERIMENT_TRACE_RESIDENT"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
+            if (traceResident != 0 && (color.address == traceResident || (traceResident == 1 && color.dccAddress != 0 && color.extent.width == 2348))) std::fprintf(stderr, "[resident] target 0x%llx format %d export %u image %p%c", static_cast<unsigned long long>(color.address), static_cast<int>(color.format), color.exportIndex, static_cast<const void*>(binding.resident->Image()), 10);
             timer.phase(PhaseReadTarget);
             binding.proxied = AttachmentProxyFormat(context, color.format) != VK_FORMAT_UNDEFINED;
             targetViews.push_back(binding.proxied ? binding.resident->AttachmentProxyView() : binding.resident->AttachmentView(color.format, color.mip, color.depthSlice, color.layers, color.arraySlice));

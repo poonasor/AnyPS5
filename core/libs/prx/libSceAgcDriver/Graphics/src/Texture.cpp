@@ -4041,7 +4041,7 @@ void StorageTexture::DumpAllLive() {
     for (const auto& texture : textures) {
         const auto bytes = texelBytes(texture->storageFormat);
         const auto& context = texture->context;
-        std::fprintf(stderr, "[dumpall] 0x%llx %ux%u last %u dim %u guest format %u vk %d dirty %d%s\n", static_cast<unsigned long long>(texture->descriptor.baseAddress), texture->descriptor.width, texture->descriptor.height, texture->descriptor.depthOrLastArray, static_cast<unsigned>(texture->descriptor.dimension), static_cast<unsigned>(texture->descriptor.format), static_cast<int>(texture->storageFormat), texture->dirty ? 1 : 0, bytes == 0 ? " (not dumped)" : "");
+        std::fprintf(stderr, "[dumpall] 0x%llx %ux%u last %u dim %u guest format %u vk %d dirty %d%s image %p\n", static_cast<unsigned long long>(texture->descriptor.baseAddress), texture->descriptor.width, texture->descriptor.height, texture->descriptor.depthOrLastArray, static_cast<unsigned>(texture->descriptor.dimension), static_cast<unsigned>(texture->descriptor.format), static_cast<int>(texture->storageFormat), texture->dirty ? 1 : 0, bytes == 0 ? " (not dumped)" : "", static_cast<const void*>(texture->image));
         if (bytes == 0) continue;
         Buffer dump(context, static_cast<std::size_t>(texture->descriptor.width) * texture->descriptor.height * bytes, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         CommandBatch batch(context);
@@ -4541,6 +4541,7 @@ std::size_t StorageTexture::NoteKeysFill(std::uint64_t address, std::size_t byte
         case 0x80: keys = DccKeys::Clear1110; break;
         case 0xc0: keys = DccKeys::Clear1111; break;
         case 0x20: keys = DccKeys::ClearRegister; break;
+        case 0x10: keys = DccKeys::ClearSingle; break;
         case 0xff: keys = DccKeys::Uncompressed; break;
         default: return 0;
     }
