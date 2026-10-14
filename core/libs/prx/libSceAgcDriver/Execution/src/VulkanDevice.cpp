@@ -3217,7 +3217,16 @@ struct TargetTrace {
         }
         std::error_code ignored;
         if (std::filesystem::remove("trace-targets.now", ignored)) armed = true;
-        dispatches.store(armed, std::memory_order_relaxed);
+        static const auto traceFlips = [] {
+            std::pair<std::uint64_t, std::uint64_t> range{0, 0};
+            if (const char* text = std::getenv("APS5_EXPERIMENT_TRACE_FLIPS")) {
+                char* end = nullptr;
+                range.first = std::strtoull(text, &end, 10);
+                range.second = *end == '-' ? std::strtoull(end + 1, nullptr, 10) : range.first;
+            }
+            return range;
+        }();
+        dispatches.store(armed || (traceFlips.second != 0 && flips >= traceFlips.first && flips <= traceFlips.second), std::memory_order_relaxed);
         targets.clear();
     }
     void Note(std::uint64_t address, std::uint32_t width, std::uint32_t height, int format, std::uint64_t indices) {
