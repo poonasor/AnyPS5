@@ -4260,6 +4260,30 @@ std::string ShaderResources::Describe() const {
     return text;
 }
 
+void ShaderResources::DumpGuestBuffers(std::uint64_t program) const {
+    for (const auto& range : describedRanges) {
+        if (range.bytes == 0 || range.bytes > (64u << 20u)) continue;
+        StorageTexture::FlushPending(range.address, static_cast<std::size_t>(range.bytes), nullptr, "dispatch dump");
+        if (!GuestMemory::Accessible(reinterpret_cast<const void*>(range.address), static_cast<std::size_t>(range.bytes))) continue;
+        char name[112];
+        std::snprintf(name, sizeof(name), "%s_%llx_%llx_%ux%u_f%u_t%d.bin", range.kind, static_cast<unsigned long long>(program), static_cast<unsigned long long>(range.address), range.width, range.height, range.format, range.tileMode);
+        if (std::FILE* file = std::fopen(name, "wb")) {
+            std::fwrite(reinterpret_cast<const void*>(range.address), 1, static_cast<std::size_t>(range.bytes), file);
+            std::fclose(file);
+        }
+    }
+    for (const auto& allocation : allocations) {
+        if (!allocation.guest || allocation.size == 0 || allocation.size > (64u << 20u)) continue;
+        if (!GuestMemory::Accessible(reinterpret_cast<const void*>(allocation.address), allocation.size)) continue;
+        char name[96];
+        std::snprintf(name, sizeof(name), "buffer_%llx_%llx_%zx%s.bin", static_cast<unsigned long long>(program), static_cast<unsigned long long>(allocation.address), allocation.size, allocation.written ? "_w" : "");
+        if (std::FILE* file = std::fopen(name, "wb")) {
+            std::fwrite(reinterpret_cast<const void*>(allocation.address), 1, allocation.size, file);
+            std::fclose(file);
+        }
+    }
+}
+
 std::size_t ShaderResources::addDataBuffer(std::span<const std::uint32_t> words) {
     const auto size = words.size() * sizeof(std::uint32_t);
     Require(size <= context.limits.maxStorageBufferRange, "shader data buffer exceeds descriptor range limit");

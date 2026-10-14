@@ -355,6 +355,8 @@ void Driver::storeBufferFill(std::uint32_t queueId, std::uint64_t base, std::siz
     recordLabelsForPacket(localDevice.get(), queueId);
     phase(FillLabels);
     GuestMemory::CheckRange(reinterpret_cast<const void*>(base), bytes, 16, true);
+    static const std::uint64_t traceFillBytes = [] { const char* text = std::getenv("APS5_EXPERIMENT_TRACE_FILLS"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
+    if (traceFillBytes != 0 && bytes == traceFillBytes) std::fprintf(stderr, "[fill] 0x%llx+0x%zx pattern %08x %08x %08x %08x%c", static_cast<unsigned long long>(base), static_cast<std::size_t>(bytes), pattern[0], pattern[1], pattern[2], pattern[3], 10);
     phase(FillCheck);
     const auto coverage = Graphics::StorageTexture::ClassifyFill(base, bytes);
     phase(FillClassify);

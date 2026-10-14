@@ -248,6 +248,7 @@ public:
     const std::vector<std::uint32_t>& FragmentLayoutKey() const { return fragmentLayoutKey; }
     // Debug aid: each bound guest resource with the fraction of sampled bytes that are nonzero.
     std::string Describe() const;
+    void DumpGuestBuffers(std::uint64_t program) const;
 
     // Reuse across dispatches of identical content (see the resource cache in VulkanDevice): the
     // key is everything a compute build consumes from its compiled shader (variant, and per binding

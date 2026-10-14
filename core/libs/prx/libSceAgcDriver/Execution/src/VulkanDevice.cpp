@@ -4205,9 +4205,11 @@ bool TraceDispatchIo() {
     return traceIo || (TargetTrace::Enabled() && TargetTrace::Get().dispatches.load(std::memory_order_relaxed));
 }
 
-bool DumpAfterArmed(std::uint64_t programAddress) {
+bool DumpAfterArmed(std::uint64_t programAddress, const char* groups) {
     static const std::uint64_t program = [] { const char* text = std::getenv("APS5_EXPERIMENT_DUMP_AFTER"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
     if (program == 0 || programAddress != program) return false;
+    static const char* wanted = std::getenv("APS5_EXPERIMENT_DUMP_AFTER_GROUPS");
+    if (wanted != nullptr && std::strcmp(wanted, groups) != 0) return false;
     std::error_code ignored;
     return std::filesystem::remove("dump-after.now", ignored);
 }
@@ -5517,11 +5519,12 @@ VulkanDevice::IndirectOutcome VulkanDevice::dispatch(const ShaderRecompiler::Rec
     }
     if (TraceDispatchIo()) std::fprintf(stderr, "[dispatch-io] program 0x%llx %s:%s\n", static_cast<unsigned long long>(programAddress), groupsText, resources->Describe().c_str());
     WatchMemory(programAddress);
-    if (DumpAfterArmed(programAddress)) {
+    if (DumpAfterArmed(programAddress, groupsText)) {
         std::fprintf(stderr, "[dumpall] after program 0x%llx\n", static_cast<unsigned long long>(programAddress));
         state->recorder->Sync();
         check(state->DeviceFunction<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(state->device), "vkDeviceWaitIdle");
         Graphics::StorageTexture::DumpAllLive();
+        resources->DumpGuestBuffers(programAddress);
     }
     // The recipe for the caller's dispatch-cache variant (design_cpu_final M4, rule R3): only an
     // object the resource cache serves under this content key (reusable: no lease, no copied
@@ -5662,11 +5665,12 @@ RecipeOutcome VulkanDevice::DispatchRecipe(const ShaderRecompiler::RecompileResu
     }
     if (TraceDispatchIo()) std::fprintf(stderr, "[dispatch-io] program 0x%llx %s:%s\n", static_cast<unsigned long long>(programAddress), groupsText, hit->resources->Describe().c_str());
     WatchMemory(programAddress);
-    if (DumpAfterArmed(programAddress)) {
+    if (DumpAfterArmed(programAddress, groupsText)) {
         std::fprintf(stderr, "[dumpall] after program 0x%llx\n", static_cast<unsigned long long>(programAddress));
         state->recorder->Sync();
         check(state->DeviceFunction<PFN_vkDeviceWaitIdle>("vkDeviceWaitIdle")(state->device), "vkDeviceWaitIdle");
         Graphics::StorageTexture::DumpAllLive();
+        hit->resources->DumpGuestBuffers(programAddress);
     }
     timer.finish(lookupsBefore, groupsText, indirect);
     if (profile) reportRecipes();

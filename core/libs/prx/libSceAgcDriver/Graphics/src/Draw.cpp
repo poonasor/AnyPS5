@@ -2248,7 +2248,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         static const bool residentTargets = std::getenv("APS5_NO_RESIDENT_TARGETS") == nullptr;
         static const bool residentLinear = std::getenv("APS5_NO_RESIDENT_LINEAR") == nullptr;
         const bool linearResident = residentLinear && color.tileMode == ColorTileMode::Linear && ExistingHostImportFor(context, color.address, colorLayout.Bytes()) != nullptr;
-        if ((binding.gpuTiling || ((color.tileMode != ColorTileMode::Linear || linearResident) && context.detiler != nullptr)) && residentTargets) {
+        static const bool experimentNoResidentDcc = std::getenv("APS5_EXPERIMENT_RESIDENT_DCC") == nullptr;
+        if ((binding.gpuTiling || ((color.tileMode != ColorTileMode::Linear || linearResident) && context.detiler != nullptr)) && residentTargets && !(experimentNoResidentDcc && color.dccAddress != 0)) {
             // The lookup refreshes the image on every draw (StorageTexture::Refresh: FlushPending,
             // CollectWrites over the target's pages, the DCC key scan of TextureClearKeys, then
             // UnchangedSince). The page walk is skipped while the worker's collect epoch lasts
@@ -3000,6 +3001,8 @@ void RunColorMetadataPass(const Context& context, const ColorMetadataPass& pass)
         }
         if (color.dccAddress == 0) continue;
         auto keys = CurrentDccKeys(color.dccAddress, color.bytes);
+        static const bool traceMetadata = std::getenv("APS5_EXPERIMENT_TRACE_METADATA") != nullptr;
+        if (traceMetadata) std::fprintf(stderr, "[metadata] pass mode %d target 0x%llx keys 0x%llx %s%c", static_cast<int>(pass.mode), static_cast<unsigned long long>(color.address), static_cast<unsigned long long>(color.dccAddress), DccKeysName(keys), 10);
         if (keys == DccKeys::Uncompressed) continue;
         if (keys == DccKeys::ClearSingle) {
             Require(pass.mode == ColorMetadataPass::Mode::DccDecompress, "CB fast-clear eliminate over comp-to-single DCC keys (whether it expands them is not modeled)");
