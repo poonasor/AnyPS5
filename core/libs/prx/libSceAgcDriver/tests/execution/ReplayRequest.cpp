@@ -60,11 +60,14 @@ int main(int argc, char** argv) {
             std::memcpy(reinterpret_cast<void*>(region.guestAddress), region.bytes.data(), region.bytes.size());
         }
         std::uint32_t groups = 1;
+        std::uint32_t groupsY = 1;
         for (int i = 2; i < argc; ++i) {
             const std::string argument = argv[i];
             const auto equals = argument.find('=');
             if (argument.rfind("groups=", 0) == 0) {
-                groups = static_cast<std::uint32_t>(std::strtoul(argument.c_str() + 7, nullptr, 0));
+                char* end = nullptr;
+                groups = static_cast<std::uint32_t>(std::strtoul(argument.c_str() + 7, &end, 0));
+                if (*end == ',') groupsY = static_cast<std::uint32_t>(std::strtoul(end + 1, nullptr, 0));
             } else if (argument.rfind("load:", 0) == 0) {
                 const auto address = std::strtoull(argument.substr(5, equals - 5).c_str(), nullptr, 16);
                 const auto bytes = ReadFile(argument.c_str() + equals + 1);
@@ -78,6 +81,12 @@ int main(int argc, char** argv) {
                     const auto word = static_cast<std::uint32_t>(std::strtoul(cursor, &end, 16));
                     Commit(address, 4);
                     std::memcpy(reinterpret_cast<void*>(address), &word, 4);
+                    for (std::size_t r = 0; r < loaded.request.context.memory.size(); ++r) {
+                        auto& region = loaded.request.context.memory[r];
+                        if (address >= region.guestAddress && address + 4 <= region.guestAddress + region.bytes.size()) {
+                            std::memcpy(const_cast<std::byte*>(region.bytes.data()) + (address - region.guestAddress), &word, 4);
+                        }
+                    }
                     address += 4;
                     cursor = *end == ',' ? end + 1 : end;
                 }
@@ -91,7 +100,7 @@ int main(int argc, char** argv) {
         loaded.request.useCache = false;
         const auto result = ShaderRecompiler::Recompile(loaded.request);
         std::printf("recompiled %zu words, host subgroup %u\n", result.spirv.size(), result.hostSubgroupSize);
-        device->Dispatch(result, groups, 1, 1, {}, loaded.request.shader.codeAddress);
+        device->Dispatch(result, groups, groupsY, 1, {}, loaded.request.shader.codeAddress);
         device->WaitIdle();
         for (int i = 2; i < argc; ++i) {
             const std::string argument = argv[i];

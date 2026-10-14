@@ -1865,6 +1865,18 @@ std::optional<State> maskedState(const State& state, const std::set<std::uint32_
     std::optional<State> masked;
     for (std::size_t index = 0; index < state.blends.size(); ++index) {
         if (fragmentOutputs.contains(static_cast<std::uint32_t>(index)) || state.blends[index].colorWriteMask == 0) continue;
+        static const bool traceMasked = std::getenv("APS5_EXPERIMENT_TRACE_MASKED") != nullptr;
+        if (traceMasked) {
+            static std::mutex mutex;
+            static std::set<std::pair<std::uint64_t, std::size_t>> reported;
+            const auto address = index < state.colors.size() ? state.colors[index].address : 0ull;
+            std::lock_guard lock(mutex);
+            if (reported.size() < 64 && reported.insert({address, index}).second) {
+                std::fprintf(stderr, "[masked] export %zu (target 0x%llx) has no pixel shader output; outputs:", index, static_cast<unsigned long long>(address));
+                for (const auto output : fragmentOutputs) std::fprintf(stderr, " %u", output);
+                std::fprintf(stderr, "%c", 10);
+            }
+        }
         if (!masked.has_value()) masked = state;
         masked->blends[index].colorWriteMask = 0;
     }
@@ -1989,7 +2001,8 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         timer.phase(PhaseSetup);
         // Debug aid: APS5_NO_RESIDENT_TARGETS=1 copies every target in and out again.
         static const bool residentTargets = std::getenv("APS5_NO_RESIDENT_TARGETS") == nullptr;
-        if ((binding.gpuTiling || (color.tileMode != ColorTileMode::Linear && context.detiler != nullptr)) && residentTargets) {
+        static const bool experimentNoResidentDcc = std::getenv("APS5_EXPERIMENT_RESIDENT_DCC") == nullptr;
+        if ((binding.gpuTiling || (color.tileMode != ColorTileMode::Linear && context.detiler != nullptr)) && residentTargets && !(experimentNoResidentDcc && color.dccAddress != 0)) {
             // The lookup refreshes the image on every draw (StorageTexture::Refresh: FlushPending,
             // CollectWrites over the target's pages, the DCC key scan of TextureClearKeys, then
             // UnchangedSince). The page walk is skipped while the worker's collect epoch lasts
@@ -2691,6 +2704,8 @@ void RunColorMetadataPass(const Context& context, const ColorMetadataPass& pass)
         }
         if (color.dccAddress == 0) continue;
         auto keys = CurrentDccKeys(color.dccAddress, color.bytes);
+        static const bool traceMetadata = std::getenv("APS5_EXPERIMENT_TRACE_METADATA") != nullptr;
+        if (traceMetadata) std::fprintf(stderr, "[metadata] pass mode %d target 0x%llx keys 0x%llx %s%c", static_cast<int>(pass.mode), static_cast<unsigned long long>(color.address), static_cast<unsigned long long>(color.dccAddress), DccKeysName(keys), 10);
         if (keys == DccKeys::Uncompressed) continue;
         if (keys == DccKeys::ClearSingle) {
             Require(pass.mode == ColorMetadataPass::Mode::DccDecompress, "CB fast-clear eliminate over comp-to-single DCC keys (whether it expands them is not modeled)");

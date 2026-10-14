@@ -102,6 +102,12 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         }
     }
     if (partialLastGroup) compute.partialThreads = partialGroups;
+    static const std::uint64_t traceUserData = [] { const char* text = std::getenv("APS5_EXPERIMENT_TRACE_USERDATA"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
+    if (traceUserData != 0 && address == traceUserData && !resolving) {
+        std::fprintf(stderr, "[userdata] program 0x%llx %ux%ux%u:", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3]);
+        for (const auto word : userData) std::fprintf(stderr, " %08x", word);
+        std::fprintf(stderr, "%c", 10);
+    }
     ShaderRecompiler::RecompileRequest request{
         {ShaderRecompiler::ShaderStage::Compute, address, std::span(snapshot.code).subspan(codeOffset), snapshot.headerAddress, snapshot.header},
         {(packet[4] & 0x8000u) != 0 ? 32u : 64u, 0, userData, compute, std::nullopt, std::nullopt, memory, DispatchFloatMode(snapshot, queue.shader)},
