@@ -5253,6 +5253,18 @@ bool StorageTexture::unchangedSinceBaseline(std::uint64_t from, std::uint64_t to
 
 void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     CaptureTrace::Log("writeback image=%llx generation=%llu reason=%s units=%zu", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(generation), flushReason, static_cast<std::size_t>(std::count(layers.begin(), layers.end(), true)));
+    static const auto watchedStores = [] {
+        std::pair<std::uint64_t, std::uint64_t> range{0, 0};
+        if (const char* text = std::getenv("APS5_EXPERIMENT_WATCH_STORES")) {
+            char* end = nullptr;
+            range.first = std::strtoull(text, &end, 16);
+            range.second = range.first + (*end == ':' ? std::strtoull(end + 1, nullptr, 16) : 0x1000ull);
+        }
+        return range;
+    }();
+    if (watchedStores.first != 0 && descriptor.baseAddress < watchedStores.second && watchedStores.first < descriptor.baseAddress + guestBytes) {
+        std::fprintf(stderr, "[store] present %llu image 0x%llx+0x%llx %ux%u format %u: %zu of %u units stored (%s)\n", static_cast<unsigned long long>(Recorder::Presents()), static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), descriptor.width, descriptor.height, descriptor.format, static_cast<std::size_t>(std::count(layers.begin(), layers.end(), true)), trackedLayers, flushReason != nullptr ? flushReason : "other");
+    }
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     PhaseTimer timer;
     struct Account {
