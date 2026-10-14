@@ -82,7 +82,18 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
     if (dumpTarget != 0) {
 
         const auto slot0 = (static_cast<std::uint64_t>(readRegister(queue.context, 0x390)) << 40u) | (static_cast<std::uint64_t>(readRegister(queue.context, 0x318)) << 8u);
-        if ((graphics.hasColorTarget && graphics.color.address == dumpTarget) || slot0 == dumpTarget) static_cast<void>(dumpRequest(program.binary.codeAddress, request));
+        static const std::uint64_t alternateTarget = [] { const char* text = std::getenv("APS5_EXPERIMENT_DUMP_DRAW_ALT"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
+        if ((graphics.hasColorTarget && graphics.color.address == dumpTarget) || slot0 == dumpTarget || (alternateTarget != 0 && slot0 == alternateTarget)) {
+            static_cast<void>(dumpRequest(program.binary.codeAddress, request));
+            const auto value = [&](std::uint32_t offset) -> std::uint64_t { const auto it = queue.context.find(offset); return it == queue.context.end() ? 0u : it->second; };
+            std::fprintf(stderr, "[drawdump] program 0x%llx target mask 0x%llx shader mask 0x%llx:", static_cast<unsigned long long>(program.binary.codeAddress), static_cast<unsigned long long>(value(0x8e)), static_cast<unsigned long long>(value(0x8f)));
+            for (std::uint32_t slot = 0; slot < 8; ++slot) {
+                const auto base = (value(0x390 + slot) << 40u) | (value(0x318 + slot * 0xf) << 8u);
+                if (base == 0) continue;
+                std::fprintf(stderr, " [%u] 0x%llx info 0x%llx attrib 0x%llx", slot, static_cast<unsigned long long>(base), static_cast<unsigned long long>(value(0x31c + slot * 0xf)), static_cast<unsigned long long>(value(0x31d + slot * 0xf)));
+            }
+            std::fprintf(stderr, "%c", 10);
+        }
     }
     if (dumpSlot1 != 0) {
         const auto value = [&](std::uint32_t offset) -> std::uint64_t { const auto it = queue.context.find(offset); return it == queue.context.end() ? 0u : it->second; };

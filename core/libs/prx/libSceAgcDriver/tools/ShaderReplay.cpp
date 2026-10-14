@@ -59,6 +59,16 @@ bool Replay(const char* path) {
         std::printf("  compute: threads %ux%ux%u, lds %u dwords, group ids %d%d%d, tg size %d, thread id components %u\n", compute.numThreads[0], compute.numThreads[1], compute.numThreads[2], compute.ldsSizeDwords, compute.groupIdEnable[0], compute.groupIdEnable[1], compute.groupIdEnable[2], compute.tgSizeEnable, compute.threadIdComponentCount);
         if (compute.PartialGroups()) std::printf("  partial groups: dispatch of %ux%ux%u threads\n", compute.partialThreads[0], compute.partialThreads[1], compute.partialThreads[2]);
     }
+    if (request.request.context.pixel.has_value()) {
+        const auto& pixel = *request.request.context.pixel;
+        std::printf("  pixel: output mode");
+        for (const auto mode : pixel.targetOutputMode) std::printf(" %u", mode);
+        std::printf(", export mapping");
+        for (const auto slot : pixel.targetExportMapping) std::printf(" %u", slot);
+        std::printf(", packing");
+        for (const auto packing : pixel.targetExportPacking) std::printf(" %u", static_cast<unsigned>(packing));
+        std::printf("\n");
+    }
     if (request.request.graphics.has_value()) {
         const auto& graphics = *request.request.graphics;
         std::printf("  graphics: %zu linked programs, draw %u indices of %u bytes at 0x%llx, %u instances\n", graphics.linkedPrograms.size(), graphics.draw.indexCount, graphics.draw.indexElementBytes, static_cast<unsigned long long>(graphics.draw.indexAddress), graphics.draw.instanceCount);

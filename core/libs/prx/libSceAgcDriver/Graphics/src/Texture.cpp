@@ -4031,11 +4031,12 @@ void StorageTexture::DumpAllLive() {
         auto& live = Live();
         std::lock_guard lock(live.mutex);
         for (auto* texture : live.textures) {
-            if (texture->released || texture->image == VK_NULL_HANDLE || (texture->descriptor.width > 64 && texture->descriptor.width < 128)) continue;
+            if (texture->released || texture->image == VK_NULL_HANDLE) continue;
             if (auto alive = texture->weak_from_this().lock()) textures.push_back(std::move(alive));
         }
     }
-    std::lock_guard gpu(GuestMemory::GpuMutex());
+    std::unique_lock gpu(GuestMemory::GpuMutex(), std::defer_lock);
+    if (!GuestMemory::GpuMutex().HeldByThisThread()) gpu.lock();
     static int serial = 0;
     for (const auto& texture : textures) {
         const auto bytes = texelBytes(texture->storageFormat);
