@@ -217,6 +217,7 @@ public:
     static bool AnyPending();
     static void FlushDumpSelected(const char* reason);
     static void DumpAllLive();
+    static void PrintWatchedReadbacks(std::uint64_t flip);
     static bool StoreAtFlipRequested(const char* value);
     static bool StoreAtLabelRequested(const char* value);
     // See PendingSerial: a change of a surface's source outside the registry (a unit shadow

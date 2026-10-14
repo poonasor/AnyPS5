@@ -1375,6 +1375,21 @@ std::shared_ptr<StorageTexture> StorageTexture::Create(const Context& context, T
     return texture;
 }
 
+namespace {
+struct WatchedReadback {
+    std::uint64_t address;
+    std::array<std::uint32_t, 4> last;
+};
+std::mutex& WatchedReadbackMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+std::vector<WatchedReadback>& WatchedReadbackList() {
+    static std::vector<WatchedReadback> list;
+    return list;
+}
+}
+
 StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, const GuestTextureResource& descriptor, std::uint32_t mipLevel) : context(context), detiler(detiler), descriptor(descriptor) {
     try {
         Require(!IsBlockCompressed(descriptor.format), "block-compressed textures cannot be storage images");
@@ -1385,6 +1400,13 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         AGC_LOG_DEFERRED(stdout, "StorageTexture address=0x%llx %ux%u mips=%u mip=%u layers=%u base=%u dim=%d tile=%d format=%u vk=%d", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, descriptor.mipCount, mipLevel,
                      descriptor.depthOrLastArray, descriptor.baseArray, static_cast<int>(descriptor.dimension), static_cast<int>(descriptor.tileMode), descriptor.format, static_cast<int>(vkFormat));
 #endif
+        if (std::getenv("APS5_EXPERIMENT_WATCH_READBACK") != nullptr && descriptor.width == 1 && descriptor.height == 1 && descriptor.tileMode == TextureTileMode::kLinear) {
+            std::lock_guard lock(WatchedReadbackMutex());
+            auto& watched = WatchedReadbackList();
+            watched.push_back({descriptor.baseAddress, {}});
+            if (watched.size() > 6) watched.erase(watched.begin());
+            std::fprintf(stderr, "[readback] storage image 0x%llx 1x1 linear format %u\n", static_cast<unsigned long long>(descriptor.baseAddress), descriptor.format);
+        }
         geometry = DescribeSurface(descriptor);
         mips = geometry.mips;
         arrayLayers = geometry.layers;
@@ -3979,6 +4001,18 @@ bool StorageDumpSelects(const GuestTextureResource& descriptor) {
     return selector.width != 0 && descriptor.width == selector.width && descriptor.height == selector.height && descriptor.depthOrLastArray + 1 == selector.layers && (selector.anyFormat || descriptor.format == selector.format);
 }
 
+}
+
+void StorageTexture::PrintWatchedReadbacks(std::uint64_t flip) {
+    std::lock_guard lock(WatchedReadbackMutex());
+    for (auto& entry : WatchedReadbackList()) {
+        std::array<std::uint32_t, 4> now{};
+        if (!GuestMemory::Accessible(reinterpret_cast<const void*>(entry.address), sizeof(now))) continue;
+        std::memcpy(now.data(), reinterpret_cast<const void*>(entry.address), sizeof(now));
+        if (now == entry.last) continue;
+        entry.last = now;
+        std::fprintf(stderr, "[readback] flip %llu 0x%llx: %08x %08x %08x %08x\n", static_cast<unsigned long long>(flip), static_cast<unsigned long long>(entry.address), now[0], now[1], now[2], now[3]);
+    }
 }
 
 void StorageTexture::DumpAllLive() {

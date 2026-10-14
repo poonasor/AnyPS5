@@ -3208,6 +3208,53 @@ struct TargetTrace {
                 last = now;
             }
         }
+        Graphics::StorageTexture::PrintWatchedReadbacks(flips);
+        static const auto floats = [] {
+            std::pair<std::uint64_t, std::uint64_t> range{0, 0};
+            if (const char* text = std::getenv("APS5_EXPERIMENT_WATCH_FLOATS")) {
+                char* end = nullptr;
+                range.first = std::strtoull(text, &end, 16);
+                range.second = *end == ':' ? std::strtoull(end + 1, nullptr, 16) : 0x1000ull;
+            }
+            return range;
+        }();
+        if (floats.first != 0) {
+            static std::uint64_t lastHash = 0;
+            static unsigned dumps = 0;
+            MEMORY_BASIC_INFORMATION info{};
+            const bool readable = VirtualQuery(reinterpret_cast<const void*>(floats.first), &info, sizeof(info)) != 0 && info.State == MEM_COMMIT && (info.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE)) != 0 && (info.Protect & PAGE_GUARD) == 0;
+            if (readable) {
+                std::vector<std::uint32_t> words(floats.second / 4);
+                std::memcpy(words.data(), reinterpret_cast<const void*>(floats.first), words.size() * 4);
+                std::uint64_t hash = 1469598103934665603ull;
+                std::size_t nonzero = 0, bad = 0, firstBad = 0;
+                float largest = 0;
+                for (std::size_t i = 0; i < words.size(); ++i) {
+                    hash = (hash ^ words[i]) * 1099511628211ull;
+                    if (words[i] != 0) ++nonzero;
+                    if ((words[i] & 0x7f800000u) == 0x7f800000u) {
+                        if (bad++ == 0) firstBad = i;
+                    } else {
+                        float value = 0;
+                        std::memcpy(&value, &words[i], 4);
+                        largest = std::max(largest, std::fabs(value));
+                    }
+                }
+                if (hash != lastHash) {
+                    lastHash = hash;
+                    std::fprintf(stderr, "[watch-floats] flip %llu 0x%llx: %zu of %zu nonzero, %zu nan/inf (first at word %zu), largest finite %g\n", static_cast<unsigned long long>(flips), static_cast<unsigned long long>(floats.first), nonzero, words.size(), bad, firstBad, static_cast<double>(largest));
+                    if (nonzero != 0 && dumps < 6) {
+                        char name[64];
+                        std::snprintf(name, sizeof(name), "watch-floats-%llu.bin", static_cast<unsigned long long>(flips));
+                        if (auto* file = std::fopen(name, "wb")) {
+                            std::fwrite(words.data(), 4, words.size(), file);
+                            std::fclose(file);
+                            ++dumps;
+                        }
+                    }
+                }
+            }
+        }
         if (armed) {
             std::vector<std::pair<std::uint64_t, Entry>> ordered(targets.begin(), targets.end());
             std::sort(ordered.begin(), ordered.end(), [](const auto& left, const auto& right) { return left.second.order < right.second.order; });
