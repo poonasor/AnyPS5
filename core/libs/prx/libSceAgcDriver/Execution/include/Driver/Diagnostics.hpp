@@ -9,6 +9,7 @@ namespace AgcDriver::DriverDetail {
 double TraceMs();
 
 std::uint64_t SkippedShader();
+bool IsSkippedShader(std::uint64_t address);
 
 void require(bool condition, const char* reason);
 
