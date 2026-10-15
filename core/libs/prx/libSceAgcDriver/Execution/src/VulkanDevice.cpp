@@ -2139,6 +2139,8 @@ VkPipelineCreateFlags VulkanDevice::computePipelineFlags() const {
 }
 
 std::uint32_t VulkanDevice::computeSubgroupSize(const ShaderRecompiler::RecompileResult& shader) const {
+    static const bool pinWave64 = std::getenv("APS5_NO_PIN_WAVE64") == nullptr;
+    if (pinWave64 && state->computeWave32 && shader.hostSubgroupSize == 64u && state->maxComputeSubgroupSize >= 64u) return 64u;
     return state->computeWave32 && (shader.hostSubgroupSize == 32u || shader.hostSubgroupSize > state->maxComputeSubgroupSize) ? std::min(shader.hostSubgroupSize, state->maxComputeSubgroupSize) : 0u;
 }
 
