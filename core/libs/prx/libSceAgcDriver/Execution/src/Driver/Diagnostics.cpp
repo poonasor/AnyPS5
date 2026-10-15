@@ -7,11 +7,30 @@
 #include <stdexcept>
 #include <string_view>
 
+#include <algorithm>
+#include <vector>
+
 namespace AgcDriver::DriverDetail {
 
 double TraceMs() {
     static const auto origin = std::chrono::steady_clock::now();
     return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - origin).count();
+}
+
+bool IsSkippedShader(std::uint64_t address) {
+    static const std::vector<std::uint64_t> skipped = [] {
+        std::vector<std::uint64_t> list;
+        const char* text = std::getenv("APS5_SKIP_SHADER");
+        while (text != nullptr && *text != 0) {
+            char* end = nullptr;
+            const auto value = std::strtoull(text, &end, 16);
+            if (end == text) break;
+            list.push_back(value);
+            text = *end == ',' ? end + 1 : end;
+        }
+        return list;
+    }();
+    return address != 0 && std::find(skipped.begin(), skipped.end(), address) != skipped.end();
 }
 
 std::uint64_t SkippedShader() {

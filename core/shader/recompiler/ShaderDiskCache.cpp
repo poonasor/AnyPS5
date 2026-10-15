@@ -1771,7 +1771,13 @@ DiskStore& store() {
 }
 
 std::uint64_t SourceVersion() {
-    return Generated::SourceVersion;
+    static const std::uint64_t version = [] {
+        const char* guard = std::getenv("APS5_LOOP_GUARD_KEYED");
+        if (guard == nullptr || *guard == 0) return Generated::SourceVersion;
+        const auto limit = std::strtoull(std::getenv("APS5_LOOP_GUARD") != nullptr ? std::getenv("APS5_LOOP_GUARD") : "0", nullptr, 10);
+        return Generated::SourceVersion ^ ((limit + 1u) * 0x9e3779b97f4a7c15ull);
+    }();
+    return version;
 }
 
 void BuildKey(const RecompileRequest& request, std::uint32_t hostSubgroupSize, std::vector<std::byte>& key) {

@@ -64,7 +64,7 @@ bool Driver::pipelineDispatch() {
 void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, const Submission& submission, std::uint64_t indirectArguments) {
     PerformanceTimer timing("Driver.Dispatch");
     const auto address = (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20c)) << 8u) | (static_cast<std::uint64_t>(readRegister(queue.shader, 0x20d) & 0xffu) << 40u);
-    if (address == SkippedShader() && address != 0) return;
+    if (IsSkippedShader(address)) return;
     auto registeredShader = RegisteredProgram(*submission.shaders, address, {0});
     if (!registeredShader) registeredShader = ReadRawShader(address);
     const auto& snapshot = *registeredShader;
@@ -162,6 +162,15 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
     if (traceUserData != 0 && address == traceUserData && !resolving) {
         std::fprintf(stderr, "[userdata] program 0x%llx %ux%ux%u:", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3]);
         for (const auto word : userData) std::fprintf(stderr, " %08x", word);
+        if (userData.size() >= 2) {
+            const auto table = userData[0] | (static_cast<std::uint64_t>(userData[1] & 0xffffu) << 32u);
+            std::array<std::uint32_t, 32> words{};
+            if (table != 0 && GuestMemory::Accessible(reinterpret_cast<const void*>(table), sizeof(words))) {
+                GuestMemory::Read(table, std::as_writable_bytes(std::span(words)), 4);
+                std::fprintf(stderr, " | table 0x%llx:", static_cast<unsigned long long>(table));
+                for (const auto word : words) std::fprintf(stderr, " %08x", word);
+            }
+        }
         std::fprintf(stderr, "%c", 10);
     }
     ShaderRecompiler::RecompileRequest request{
