@@ -4648,7 +4648,9 @@ std::shared_ptr<ComputePipelineObjects> VulkanDevice::computePipeline(const Grap
         check(state->DeviceFunction<PFN_vkCreatePipelineLayout>("vkCreatePipelineLayout")(state->device, &layoutInfo, nullptr, &objects->layout), "vkCreatePipelineLayout");
         const VkPipelineCreateFlags pipelineFlags = (context.pipelineExecutableInfo ? VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR : 0) | VK_PIPELINE_CREATE_DISPATCH_BASE_BIT;
         const Graphics::PipelineSpecialization specialization(shader);
-        const auto subgroupSize = state->computeWave32 && (shader.hostSubgroupSize == 32u || shader.hostSubgroupSize > state->maxComputeSubgroupSize) ? std::min(shader.hostSubgroupSize, state->maxComputeSubgroupSize) : 0u;
+        static const bool pinWave64 = std::getenv("APS5_NO_PIN_WAVE64") == nullptr;
+        const bool pinned = pinWave64 && state->computeWave32 && shader.hostSubgroupSize == 64u && state->maxComputeSubgroupSize >= 64u;
+        const auto subgroupSize = pinned ? 64u : state->computeWave32 && (shader.hostSubgroupSize == 32u || shader.hostSubgroupSize > state->maxComputeSubgroupSize) ? std::min(shader.hostSubgroupSize, state->maxComputeSubgroupSize) : 0u;
         if (const char* directory = std::getenv("APS5_DUMP_COMPUTE_PIPELINES"); directory != nullptr && *directory != '\0' && CaptureComputePipeline(shader.spirv.size())) {
             ComputePipelineCapture capture;
             capture.spirv = shader.spirv.Copy();
