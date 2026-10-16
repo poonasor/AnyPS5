@@ -128,6 +128,7 @@ private:
     Tier& tierFor(std::size_t capacity, VkMemoryPropertyFlags properties);
     static bool DeviceTierEnabled();
     static VkDeviceSize deviceBudget(const Context& context);
+    static bool LargeClasses();
     static bool DeviceTiered(VkMemoryPropertyFlags properties);
     static std::size_t NextCapacity(std::size_t capacity);
     VkDeviceSize destroy(const BufferAllocation& allocation) noexcept;

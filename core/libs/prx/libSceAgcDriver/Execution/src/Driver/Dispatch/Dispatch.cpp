@@ -159,8 +159,23 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         compute.partialThreads = {~0u, ~0u, ~0u};
     }
     static const std::uint64_t traceUserData = [] { const char* text = std::getenv("APS5_EXPERIMENT_TRACE_USERDATA"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
+    static constexpr std::array<std::uint32_t, 40> htileZeroMaskReplaceKernel{0xbfa00002u, 0xd7460008u, 0x04010a05u, 0xe0382000u, 0x80000008u, 0xbf8c3f70u, 0x3608048fu, 0x360a068fu, 0x360c028fu, 0x360e008fu, 0x7d8408f9u, 0x06868680u, 0x7d840af9u, 0x06868880u, 0x7d840cf9u, 0x06868a80u, 0x7d840e80u, 0xd5010006u, 0x00180902u, 0xd5010007u, 0x00200903u, 0xd5010005u, 0x00280901u, 0x020808f9u, 0x86060600u, 0x7d8a04f9u, 0x06068406u, 0x7d8a0707u, 0x7d8a02f9u, 0x06068605u, 0x7d8a00f9u, 0x06068804u, 0x88ea6a04u, 0x88ea6a06u, 0x88ea6a08u, 0xbefe046au, 0xbf880002u, 0xe0782000u, 0x80000408u, 0xbf810000u};
+    std::uint64_t knownBase = 0;
+    std::size_t knownBytes = 0;
+    std::optional<std::uint32_t> knownAfter;
+    if (!resolving && indirectArguments == 0 && userData.size() == 5 && (packet[4] & 0x20u) != 0 && packet[2] == 1 && packet[3] == 1) {
+        const auto code = std::span(snapshot.code).subspan(codeOffset);
+        if (code.size() >= htileZeroMaskReplaceKernel.size() && std::equal(htileZeroMaskReplaceKernel.begin(), htileZeroMaskReplaceKernel.end(), code.begin()) && ((userData[1] >> 16u) & 0x3fffu) == 16u) {
+            knownBase = userData[0] | (static_cast<std::uint64_t>(userData[1] & 0xffffu) << 32u);
+            knownBytes = static_cast<std::size_t>(std::min<std::uint64_t>(static_cast<std::uint64_t>(packet[1]), userData[2]) * 16u);
+            if (const auto before = Graphics::KnownWordFill(knownBase, knownBytes)) knownAfter = (*before & 0xfu) == 0 ? userData[4] : *before;
+        }
+    }
     if (traceUserData != 0 && address == traceUserData && !resolving) {
-        std::fprintf(stderr, "[userdata] program 0x%llx %ux%ux%u:", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3]);
+        std::fprintf(stderr, "[userdata] program 0x%llx %ux%ux%u flags %08x code", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3], packet.size() > 4 ? packet[4] : 0u);
+        const auto traceCode = std::span(snapshot.code).subspan(codeOffset);
+        for (std::size_t word = 0; word < std::min<std::size_t>(traceCode.size(), 64); ++word) std::fprintf(stderr, " %08x", traceCode[word]);
+        std::fprintf(stderr, " |");
         for (const auto word : userData) std::fprintf(stderr, " %08x", word);
         if (userData.size() >= 2) {
             const auto table = userData[0] | (static_cast<std::uint64_t>(userData[1] & 0xffffu) << 32u);
@@ -630,6 +645,14 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         if (keysRecorder != nullptr && keysRecorder == Graphics::Recorder::Active()) {
             const auto note = keysRecorder->LastWriteNote(keysFill->base, keysFill->bytes);
             if (note != 0 && note != keysNoteBefore) Graphics::NoteKeysFillOnGpu(keysFill->base, keysFill->bytes, *filledKeys);
+        }
+        if (knownAfter) Graphics::NoteWordFill(knownBase, knownBytes, *knownAfter, GuestMemory::CollectWrites(knownBase, knownBytes));
+        static const bool experimentHtileClearRecorded = std::getenv("APS5_EXPERIMENT_HTILE_CLEAR_RECORDED") != nullptr;
+        if (experimentHtileClearRecorded && !resolving) {
+            if (const auto htile = Graphics::HtileDepthClearAddress(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads); htile != 0) {
+                const auto threads = (packet[4] & 0x20u) != 0 ? static_cast<std::uint64_t>(packet[1]) : static_cast<std::uint64_t>(packet[1]) * compute.numThreads[0];
+                Graphics::NoteHtileClearRecorded(htile, static_cast<std::size_t>(threads * 16u));
+            }
         }
         if (builtRecipe != nullptr) {
             if (dataHit) {

@@ -16,6 +16,8 @@
 #include <atomic>
 #include <bit>
 #include <cmath>
+#include <chrono>
+#include <cstdlib>
 #include <limits>
 #include <shared_mutex>
 #include <cstdio>
@@ -1422,6 +1424,11 @@ std::map<std::uint64_t, std::uint64_t>& htileReads() {
     return *reads;
 }
 
+std::set<std::uint64_t>& recordedHtileClears() {
+    static std::set<std::uint64_t> clears;
+    return clears;
+}
+
 void forgetHtileReads(std::uint64_t address, std::size_t bytes) {
     std::lock_guard lock(htileReadsMutex());
     auto& reads = htileReads();
@@ -1500,8 +1507,32 @@ VkImageAspectFlags storeBackClearedHtile(const Context& context, const DepthTarg
     const bool pending = recorder != nullptr && recorder->PendingWriteOverlaps(target.htileAddress, bytes);
     if (!pending) {
         std::lock_guard lock(htileReadsMutex());
-        const auto found = htileReads().find(target.htileAddress);
-        if (found != htileReads().end() && found->second != 0 && GuestMemory::UnchangedSince(target.htileAddress, bytes, found->second)) return 0;
+        const bool recordedClear = recordedHtileClears().contains(target.htileAddress);
+        if (recorder == nullptr || recordedClear || !recorder->PendingWriteOverlaps(target.htileAddress, bytes)) {
+            const auto found = htileReads().find(target.htileAddress);
+            if (found != htileReads().end() && found->second != 0 && GuestMemory::UnchangedSince(target.htileAddress, bytes, found->second)) return 0;
+            if (recordedClear) recordedHtileClears().erase(target.htileAddress);
+        }
+    }
+    if (htileFillKnown() && recorder != nullptr && recorder->PendingWriteOverlaps(target.htileAddress, bytes)) {
+        if (const auto word = knownFillWord(target.htileAddress, bytes)) {
+            VkImageAspectFlags known = VK_IMAGE_ASPECT_DEPTH_BIT | (target.htileStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+            known &= HtileFillClears(*word, target.htileStencil);
+            auto generation = collected;
+            if (known != 0) {
+                const auto expanded = expandedHtileWord(*word, target.htileStencil, known);
+                if (!recordHtileFill(context, *recorder, target.htileAddress, bytes, expanded)) known = 0;
+                else {
+                    generation = GuestMemory::MarkWritten(target.htileAddress, bytes);
+                    NoteWordFill(target.htileAddress, bytes, expanded, generation);
+                }
+            }
+            if (known != 0 || HtileFillClears(*word, target.htileStencil) == 0) {
+                std::lock_guard lock(htileReadsMutex());
+                htileReads()[target.htileAddress] = generation;
+                return known;
+            }
+        }
     }
     static const bool pendingFills = std::getenv("APS5_NO_PENDING_HTILE_FILLS") == nullptr;
     if (pending && pendingFills) {
@@ -1522,6 +1553,10 @@ VkImageAspectFlags storeBackClearedHtile(const Context& context, const DepthTarg
         }
     }
     std::vector<std::uint32_t> words(bytes / 4u);
+    static const bool traceHtileSync = std::getenv("APS5_EXPERIMENT_TRACE_HTILE_SYNC") != nullptr;
+    std::optional<Recorder::PendingWriteInfo> pendingInfo;
+    if (traceHtileSync && recorder != nullptr) pendingInfo = recorder->DescribePendingWrite(target.htileAddress, bytes);
+    const auto readStart = std::chrono::steady_clock::now();
     GuestMemory::Read(target.htileAddress, std::as_writable_bytes(std::span(words)), 4);
     VkImageAspectFlags cleared = VK_IMAGE_ASPECT_DEPTH_BIT | (target.htileStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
     for (const auto word : words) cleared &= HtileFillClears(word, target.htileStencil);
@@ -1613,6 +1648,32 @@ void retire(DepthSurface& surface) {
     std::erase(planes.ranges, plane);
     publishStaleHull(planes);
 }
+}
+
+void NoteWordFill(std::uint64_t address, std::size_t bytes, std::uint32_t word, std::uint64_t generation) {
+    if (!htileFillKnown() || bytes == 0) return;
+    std::lock_guard lock(wordFillsMutex());
+    auto& fills = wordFills();
+    const auto end = address + bytes;
+    for (auto it = fills.begin(); it != fills.end();) {
+        if (it->first < end && address < it->first + it->second.bytes) it = fills.erase(it);
+        else ++it;
+    }
+    if (fills.size() >= 256) fills.erase(fills.begin());
+    fills[address] = {bytes, word, generation};
+}
+
+std::optional<std::uint32_t> KnownWordFill(std::uint64_t address, std::size_t bytes) {
+    if (!htileFillKnown()) return std::nullopt;
+    return knownFillWord(address, bytes);
+}
+
+void NoteHtileClearRecorded(std::uint64_t htileAddress, std::size_t bytes) {
+    if (bytes == 0 || !GuestMemory::Accessible(reinterpret_cast<const void*>(htileAddress), bytes, true)) return;
+    const auto generation = GuestMemory::CollectWrites(htileAddress, bytes);
+    std::lock_guard lock(htileReadsMutex());
+    htileReads()[htileAddress] = generation;
+    recordedHtileClears().insert(htileAddress);
 }
 
 std::uint64_t DepthSurfacesSerial() {

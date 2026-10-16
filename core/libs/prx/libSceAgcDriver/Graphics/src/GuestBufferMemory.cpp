@@ -4945,7 +4945,8 @@ void GuestBufferMemory::recordGpuCopies(std::span<Region* const> copies, bool ad
         std::shared_ptr<Buffer> inputSnapshot;
         auto copySource = region->copySource;
         auto copyOffset = region->begin - region->copySourceBase;
-        if (!pendingWriter && !writable) {
+        static const bool experimentNoCopySnapshot = std::getenv("APS5_EXPERIMENT_NO_COPY_SNAPSHOT") != nullptr;
+        if (!pendingWriter && !writable && !(experimentNoCopySnapshot && copySource != VK_NULL_HANDLE)) {
             inputSnapshot = std::make_shared<Buffer>(context, static_cast<std::size_t>(bytes), VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
             std::memcpy(inputSnapshot->Bytes().data(), reinterpret_cast<const void*>(address), static_cast<std::size_t>(bytes));
             copySource = inputSnapshot->Handle();

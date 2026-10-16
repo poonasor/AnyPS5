@@ -3,6 +3,7 @@
 #include "prx/libc/include/General.hpp"
 #include "prx/libc/include/PreciseWait.hpp"
 #include <algorithm>
+#include <cstdlib>
 #include <thread>
 #include <chrono>
 #include <cstdio>
@@ -646,10 +647,12 @@ std::optional<StoreWrite> ResolveStore(std::span<const std::uint32_t> packet, co
             return StoreWrite{destination, {}, copyDataSource(packet, queue, bytes)};
         }
         case 0x50: {
-            if (packet.size() < 7 || dmaDestination(packet) == DmaSelectGds) return std::nullopt;
+            static const bool experimentGdsStores = std::getenv("APS5_EXPERIMENT_GDS_STORES") != nullptr;
+            const bool gds = dmaDestination(packet) == DmaSelectGds;
+            if (packet.size() < 7 || (gds && (!experimentGdsStores || !memorySelector(dmaSource(packet)) || packet[5] != 0 || !gdsRange(packet[4], DmaBytes(packet))))) return std::nullopt;
             if (dmaDestination(packet) == DmaDestinationNowhere) return StoreWrite{address(packet[2], packet[3]), {}, {}};
             const std::size_t bytes = DmaBytes(packet);
-            const auto destination = address(packet[4], packet[5]);
+            const auto destination = gds ? GdsAddress() + packet[4] : address(packet[4], packet[5]);
             if (!fits(destination, bytes)) return std::nullopt;
             return StoreWrite{destination, {}, dmaSourceBytes(packet)};
         }

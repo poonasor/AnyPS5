@@ -5160,8 +5160,17 @@ std::vector<PresyncSurface> ShaderResources::PresyncSurfaces() const {
     // sampled texture of one views that image (SampledFromStorageEligible), so neither waits for
     // the producer.
     const auto consider = [&](std::uint32_t format, std::uint64_t address, std::uint64_t guestBytes, bool sampled) {
-        const bool gpuDirect = sampled ? SampledFromStorageEligible(context, format, address, guestBytes) : HostImportCovers(context, address, static_cast<std::size_t>(guestBytes));
+        static const bool experimentPresyncImport = std::getenv("APS5_EXPERIMENT_PRESYNC_IMPORT") != nullptr;
+        const bool gpuDirect = sampled ? SampledFromStorageEligible(context, format, address, guestBytes) : (HostImportCovers(context, address, static_cast<std::size_t>(guestBytes)) || (experimentPresyncImport && [&] {
+            std::lock_guard gpu(GuestMemory::GpuMutex());
+            return HostImportFor(context, address, static_cast<std::size_t>(guestBytes)) != nullptr;
+        }()));
         if (!gpuDirect) surfaces.push_back({address, guestBytes, false});
+        static const bool tracePresyncSurfaces = std::getenv("APS5_EXPERIMENT_TRACE_PRESYNC") != nullptr;
+        if (tracePresyncSurfaces && !gpuDirect && Recorder::SnapshotWriteOverlaps(address, static_cast<std::size_t>(guestBytes))) {
+            static std::atomic<int> traced{0};
+            if (traced.fetch_add(1) < 400) std::fprintf(stderr, "[presync-surface] 0x%llx+0x%llx format %u sampled %d importCovers %d%c", static_cast<unsigned long long>(address), static_cast<unsigned long long>(guestBytes), format, sampled ? 1 : 0, HostImportCovers(context, address, static_cast<std::size_t>(guestBytes)) ? 1 : 0, 10);
+        }
     };
     static const bool keyRanges = std::getenv("APS5_NO_DCC_PRESYNC") == nullptr;
     const auto considerKeys = [&](std::uint64_t dccAddress, std::uint64_t guestBytes) {

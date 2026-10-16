@@ -2332,6 +2332,13 @@ bool StorageTexture::Refresh() {
     static const bool experimentSkipStoreUploads = std::getenv("APS5_EXPERIMENT_SKIP_STORE_UPLOADS") != nullptr;
     if (experimentSkipStoreUploads && !keysChanged && !cpuWrote && generation != 0) {
         uploadedKeys = keys;
+        if (std::any_of(changed.begin(), changed.end(), [](bool selected) { return selected; })) {
+            const auto now = GuestMemory::CollectWrites(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
+            for (std::uint32_t unit = 0; unit < trackedLayers; ++unit) {
+                if (changed[unit] && !layerPending[unit]) layerGeneration[unit] = now;
+            }
+            refreshGeneration();
+        }
     } else if (std::any_of(changed.begin(), changed.end(), [](bool selected) { return selected; })) {
         uploadReason = keysChanged ? "keys" : cpuWrote ? "cpu" : generation == 0 ? "untracked" : flushed ? "flushed" : "store";
         upload(&changed);

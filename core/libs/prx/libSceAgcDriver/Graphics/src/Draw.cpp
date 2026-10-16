@@ -383,6 +383,7 @@ struct DrawOutcome {
     std::uint64_t partialLookups = 0;
     std::uint64_t pagesWalked = 0;
     double lookupUs = 0;
+    std::array<double, LookupOutcomes::Count> slowOutcomeMs{};
     // How the draw's resources came about (DrawKind), for the per-kind averages.
     std::size_t kind = 0;
     // The flush hook's fence waits made inside this draw (index and vertex reads, the target
@@ -407,6 +408,7 @@ struct DrawProfile {
     std::uint64_t partialLookups = 0;
     std::uint64_t pagesWalked = 0;
     double lookupUs = 0;
+    std::array<double, LookupOutcomes::Count> slowOutcomeMs{};
     std::array<double, PhaseCount> totalsUs{};
     // The longest single draw's time per phase, and the longest draw: the [lock] line's 'draw'
     // hold max (tens of ms against an average well under a millisecond) needs a phase name.
@@ -522,6 +524,7 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     profile.partialLookups += outcome.partialLookups;
     profile.pagesWalked += outcome.pagesWalked;
     profile.lookupUs += outcome.lookupUs;
+    for (std::size_t k = 0; k < LookupOutcomes::Count; ++k) profile.slowOutcomeMs[k] += outcome.slowOutcomeMs[k];
     if (outcome.kind < KindCount) {
         ++profile.kindCounts[outcome.kind];
         profile.kindUs[outcome.kind] += drawUs;
@@ -544,6 +547,13 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
         n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " %s=%.1fms", DrawPhaseNames[i], profile.totalsUs[i] / 1000.0);
         if (i == PhaseResources && room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " (bindings %.1f, upload %.1f, descriptors %.1f, other %.1f of which %.1f in %llu address-based builds)", profile.bindingsUs / 1000.0, profile.uploadUs / 1000.0, profile.descriptorsUs / 1000.0, profile.otherUs / 1000.0, profile.addressOtherUs / 1000.0, static_cast<unsigned long long>(profile.addressBuilds));
         if (i == PhaseReadTarget && room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " (%llu resident lookups, %llu of them >= 1 ms = %.1f; target lookups: full-scissor %llu / partial %llu / pages walked %llu / %.0f us)", static_cast<unsigned long long>(profile.targetLookups), static_cast<unsigned long long>(profile.slowLookups), profile.slowLookupUs / 1000.0, static_cast<unsigned long long>(profile.fullScissorLookups), static_cast<unsigned long long>(profile.partialLookups), static_cast<unsigned long long>(profile.pagesWalked), profile.lookupUs);
+        if (i == PhaseReadTarget && room()) {
+            n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " (slow lookups by outcome ms:");
+            for (std::size_t k = 0; k < LookupOutcomes::Count && room(); ++k) {
+                if (profile.slowOutcomeMs[k] >= 1.0) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " %s %.0f", LookupOutcomes::Name(static_cast<LookupOutcomes::Kind>(k)), profile.slowOutcomeMs[k]);
+            }
+            if (room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), ")");
+        }
     }
     if (room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), "; per kind (avg us, count):");
     for (std::size_t kind = 0; kind < KindCount && room(); ++kind) {
@@ -589,6 +599,7 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     profile.slowLookupUs = 0;
     profile.fullScissorLookups = profile.partialLookups = profile.pagesWalked = 0;
     profile.lookupUs = 0;
+    profile.slowOutcomeMs.fill(0);
     profile.kindUs.fill(0);
     profile.kindCounts.fill(0);
     profile.cacheHits = profile.cacheMisses = profile.cacheInvalidated = profile.uncacheable = 0;
@@ -1378,6 +1389,7 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
 std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, const State& state, const ColorTarget& color, DrawOutcome& outcome, bool profile, const std::function<std::shared_ptr<StorageTexture>()>& lookup) {
     const auto lookupStart = std::chrono::steady_clock::now();
     const auto walkedBefore = profile ? GuestMemory::ThreadCollectedBytes() : 0;
+    const auto outcomesBefore = profile ? ThreadLookupOutcomes().ms : std::array<double, LookupOutcomes::Count>{};
     std::shared_ptr<StorageTexture> resident;
     try {
         resident = lookup();
@@ -1395,6 +1407,8 @@ std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, co
         if (lookupUs >= 1000.0) {
             ++outcome.slowLookups;
             outcome.slowLookupUs += lookupUs;
+            const auto& outcomesAfter = ThreadLookupOutcomes().ms;
+            for (std::size_t k = 0; k < LookupOutcomes::Count; ++k) outcome.slowOutcomeMs[k] += outcomesAfter[k] - outcomesBefore[k];
         }
         outcome.lookupUs += lookupUs;
         outcome.pagesWalked += (GuestMemory::ThreadCollectedBytes() - walkedBefore) / 4096;
@@ -2048,11 +2062,21 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     APS5_LOG_CHARS_OUT_DEBUG("Resources bound");
     pushDrawConstants(*record.pipeline, commands, state, draw, shaders, resources, record.pushBytes, record.pushStages, meshArguments != nullptr ? meshArguments->DeviceAddress() : 0, !inputs.restartTable.empty());
     APS5_LOG_CHARS_OUT_DEBUG("Push constants recorded");
+    static const bool experimentDrawProgramTiming = std::getenv("APS5_EXPERIMENT_DRAW_PROGRAM_TIMING") != nullptr;
+    std::uint32_t programTiming = Recorder::NoTiming;
+    if (experimentDrawProgramTiming) {
+        std::uint64_t key = 0;
+        for (const auto& shader : shaders) {
+            if (shader.stage == ShaderRecompiler::ShaderStage::Fragment && shader.program != nullptr) key = shader.program->variantId;
+        }
+        if (key != 0) programTiming = recorder->BeginGpuTiming(key);
+    }
     if (record.stencilReplay.empty()) recordDrawCommands(context, commands, state, draw, inputs, record.indirect, argumentBuffer, argumentOffset);
     else {
         recordStencilReplay(context, commands, state, draw, inputs, record.stencilReplay, shaders, resources, record.pushBytes, record.pushStages);
         for (const auto& [reference, pipeline] : record.stencilReplay) recorder->Keep(pipeline);
     }
+    if (programTiming != Recorder::NoTiming) recorder->EndGpuTiming(programTiming);
     if (record.pipeline->SplitsFaces()) {
         record.pipeline->ContinueBackFaces(commands, state);
         recordDrawCommands(context, commands, state, draw, inputs, record.indirect, argumentBuffer, argumentOffset);

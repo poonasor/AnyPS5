@@ -40,7 +40,8 @@ constexpr VkBufferUsageFlags deviceUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | 
 
 BufferPool::BufferPool(const Context& context) : maxSlots(std::max<std::size_t>(1, std::min<std::size_t>(MaxSlots(), context.limits.maxMemoryAllocationCount / 6u))), cacheReclaim(context.cacheReclaim), device(context.device), unmap(context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")), destroyBuffer(context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")), freeMemory(context.Function<PFN_vkFreeMemory>("vkFreeMemory")), allocateMemory(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")), mapMemory(context.Function<PFN_vkMapMemory>("vkMapMemory")), physical(context.physical), memoryProperties(context.memory), memoryProperties2(context.memoryProperties2) {
     smallTier.budget = smallBudget;
-    largeTier.budget = budget;
+    static const char* largeMib = std::getenv("APS5_EXPERIMENT_LARGE_POOL_MIB");
+    largeTier.budget = largeMib != nullptr ? static_cast<VkDeviceSize>(std::strtoull(largeMib, nullptr, 10)) << 20u : budget;
     deviceTier.budget = deviceBudget(context);
     memoryProperties = context.memory;
     physical = context.physical;
@@ -362,6 +363,11 @@ VkDeviceSize BufferPool::destroy(const BufferAllocation& allocation) noexcept {
     return allocation.allocationBytes;
 }
 
+bool BufferPool::LargeClasses() {
+    static const bool enabled = std::getenv("APS5_EXPERIMENT_LARGE_CLASSES") != nullptr;
+    return enabled;
+}
+
 bool BufferPool::DeviceTiered(VkMemoryPropertyFlags properties) {
     return (properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0 && (properties & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) == 0 && DeviceTierEnabled();
 }
@@ -370,7 +376,7 @@ std::size_t BufferPool::Capacity(std::size_t bytes, VkMemoryPropertyFlags proper
     constexpr std::size_t smallest = 256;
     if (exactSizes()) return bytes;
     if (bytes < classLimit) return std::max(smallest, std::bit_ceil(bytes));
-    if (!DeviceTiered(properties)) return bytes;
+    if (!DeviceTiered(properties) && !LargeClasses()) return bytes;
     const auto step = std::bit_floor(bytes) >> deviceClassBits;
     return (bytes + step - 1) / step * step;
 }
@@ -402,7 +408,7 @@ std::optional<BufferAllocation> BufferPool::Take(std::size_t bytes, VkBufferUsag
         }
     }
     auto& tier = tierFor(capacity, properties);
-    const auto largest = &tier == &deviceTier && !exactSizes() && bytes <= std::numeric_limits<std::size_t>::max() / 2 ? std::max(capacity, bytes * 2) : capacity;
+    const auto largest = (&tier == &deviceTier || (LargeClasses() && &tier == &largeTier && capacity >= classLimit)) && !exactSizes() && bytes <= std::numeric_limits<std::size_t>::max() / 2 ? std::max(capacity, bytes * 2) : capacity;
     auto found = tier.free.end();
     for (auto size = capacity; size <= largest && found == tier.free.end(); size = NextCapacity(size)) found = tier.free.find({size, usage, properties});
     if (found == tier.free.end() || found->second.empty()) {

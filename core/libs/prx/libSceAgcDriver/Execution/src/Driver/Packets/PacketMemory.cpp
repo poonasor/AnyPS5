@@ -203,6 +203,15 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
             }
         }
         if (drained) ++storesDrained;
+        static const bool traceDmaDrain = std::getenv("APS5_EXPERIMENT_TRACE_DMA_DRAIN") != nullptr;
+        if (traceDmaDrain && drained && opcode == 0x50) {
+            static std::atomic<int> traced{0};
+            if (traced.fetch_add(1) < 200) {
+                std::fprintf(stderr, "[dma-drain] queue 0x%x src %u dst %u words", submission.queue, Pm4::DmaSource(packet), Pm4::DmaDestination(packet));
+                for (std::size_t word = 0; word < packet.size() && word < 8; ++word) std::fprintf(stderr, " %08x", packet[word]);
+                std::fprintf(stderr, "%c", 10);
+            }
+        }
     }
 
     static const bool drawDrain = std::getenv("APS5_DRAW_DRAIN") != nullptr;

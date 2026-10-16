@@ -22,6 +22,9 @@ SampleOrderTarget DepthSurfaceOrderTarget(const Context& context, const DepthTar
 DepthSampleLocations DepthSurfaceSampleLocations(const Context& context, const DepthTarget& target);
 std::vector<std::pair<std::uint64_t, std::uint64_t>> FlushDepthPlanes(std::uint64_t address, std::size_t bytes);
 bool DepthPlanesStale();
+void NoteWordFill(std::uint64_t address, std::size_t bytes, std::uint32_t word, std::uint64_t generation);
+void NoteHtileClearRecorded(std::uint64_t htileAddress, std::size_t bytes);
+std::optional<std::uint32_t> KnownWordFill(std::uint64_t address, std::size_t bytes);
 bool SampleLocationsCompatibleDepth(const Context& context, VkFormat format, std::uint32_t samples);
 std::uint64_t DepthSurfacesSerial();
 std::uint64_t DepthSurfacesReleased();
