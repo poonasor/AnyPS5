@@ -32,6 +32,7 @@
 #include <cstring>
 #include <limits>
 #include <map>
+#include <tuple>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -2210,11 +2211,12 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         std::unique_ptr<Buffer> transfer;
         // Guest bytes in host memory, and their device-local copies for the detiler.
         std::unique_ptr<Buffer> tiled;
-        std::unique_ptr<DeviceBuffer> tiledDevice;
-        std::unique_ptr<DeviceBuffer> linearDevice;
+        std::shared_ptr<DeviceBuffer> tiledDevice;
+        std::shared_ptr<DeviceBuffer> linearDevice;
+        bool sharedDevice = false;
         std::vector<std::byte> original;
         TileMipLayout mip{};
-        std::unique_ptr<RenderTarget> target;
+        std::shared_ptr<RenderTarget> target;
         bool multisampled = false;
         VkImage multisampleImage = VK_NULL_HANDLE;
         std::shared_ptr<void> multisampleOwner;
@@ -2250,8 +2252,10 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         const bool linearResident = residentLinear && color.tileMode == ColorTileMode::Linear && ExistingHostImportFor(context, color.address, colorLayout.Bytes()) != nullptr;
         static const char* residentDccMode = std::getenv("APS5_EXPERIMENT_RESIDENT_DCC");
         static const bool experimentNoResidentDcc = residentDccMode != nullptr && std::strcmp(residentDccMode, "all") == 0;
-        static const bool experimentSingleOnly = residentDccMode == nullptr || std::strcmp(residentDccMode, "single") == 0;
+        static const bool experimentStrip = residentDccMode != nullptr && std::strcmp(residentDccMode, "strip") == 0;
+        static const bool experimentSingleOnly = residentDccMode == nullptr || std::strcmp(residentDccMode, "single") == 0 || experimentStrip;
         bool copyDcc = experimentNoResidentDcc && color.dccAddress != 0;
+        bool stripDcc = false;
         if (experimentSingleOnly && color.dccAddress != 0) {
             static std::mutex singleMutex;
             static std::set<std::uint64_t> singleTargets;
@@ -2261,6 +2265,11 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                 std::fprintf(stderr, "[gpu] DCC color target 0x%llx has single-color keys: rendered through the copied path from now on%c", static_cast<unsigned long long>(color.address), 10);
             }
             copyDcc = singleTargets.contains(color.address);
+            if (copyDcc && experimentStrip) {
+                copyDcc = false;
+                stripDcc = true;
+                if (CurrentDccKeys(color.dccAddress, colorLayout.Bytes()) != DccKeys::Uncompressed) MarkDccUncompressed(context, color.dccAddress, colorLayout.Bytes(), colorKeyCount(color, colorLayout.Bytes()));
+            }
         }
         if ((binding.gpuTiling || ((color.tileMode != ColorTileMode::Linear || linearResident) && context.detiler != nullptr)) && residentTargets && !copyDcc) {
             // The lookup refreshes the image on every draw (StorageTexture::Refresh: FlushPending,
@@ -2282,7 +2291,9 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                     Require(resident->Attachable(), "storage format cannot be a color attachment");
                     return resident;
                 }
-                auto resident = CachedStorageSurface(context, SurfaceForTarget(color));
+                auto surface = SurfaceForTarget(color);
+                if (stripDcc) surface.dccAddress = 0;
+                auto resident = CachedStorageSurface(context, surface);
                 Require(resident->Attachable(), "storage format cannot be a color attachment");
                 Require(color.mipCount > 1 || color.depth > 1 || resident->GuestBytes() == colorLayout.Bytes(), "resident image layout differs from the color layout");
                 return resident;
@@ -2304,11 +2315,30 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         if (binding.gpuTiling) {
             binding.mip = color.mipTail ? ComputeColorTargetMipLayout(color.tileMode, color.elementBytes, color.surfaceExtent.width, color.surfaceExtent.height, color.mipCount, color.mip) : ColorTargetMip(color, colorLayout);
             binding.tiled = std::make_unique<Buffer>(context, colorLayout.Bytes(), copies);
-            binding.tiledDevice = std::make_unique<DeviceBuffer>(context, colorLayout.Bytes(), copies | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            binding.linearDevice = std::make_unique<DeviceBuffer>(context, colorLayout.LinearBytes(), copies | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
-            binding.original.resize(colorLayout.Bytes());
-            GuestMemory::Read(color.address, binding.original, colorLayout.Alignment());
-            std::memcpy(binding.tiled->Bytes().data(), binding.original.data(), binding.original.size());
+            static const bool sharedScratch = std::getenv("APS5_NO_SHARED_TARGET_SCRATCH") == nullptr;
+            if (sharedScratch) {
+                static std::mutex scratchMutex;
+                static std::map<std::tuple<VkDevice, std::uint64_t, std::size_t, std::size_t>, std::pair<std::shared_ptr<DeviceBuffer>, std::shared_ptr<DeviceBuffer>>> scratch;
+                std::lock_guard scratchLock(scratchMutex);
+                auto& entry = scratch[{context.device, color.address, static_cast<std::size_t>(colorLayout.Bytes()), static_cast<std::size_t>(colorLayout.LinearBytes())}];
+                if (entry.first == nullptr) {
+                    if (scratch.size() > 16) {
+                        static std::atomic<bool> reported{false};
+                        if (!reported.exchange(true)) std::fprintf(stderr, "[gpu] more than 16 copied color targets: per-target device scratch is kept for each (never freed)%c", 10);
+                    }
+                    entry.first = std::shared_ptr<DeviceBuffer>(new DeviceBuffer(context, colorLayout.Bytes(), copies | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT), [](DeviceBuffer*) {});
+                    entry.second = std::shared_ptr<DeviceBuffer>(new DeviceBuffer(context, colorLayout.LinearBytes(), copies | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT), [](DeviceBuffer*) {});
+                }
+                binding.tiledDevice = entry.first;
+                binding.linearDevice = entry.second;
+                binding.sharedDevice = true;
+            } else {
+                binding.tiledDevice = std::make_shared<DeviceBuffer>(context, colorLayout.Bytes(), copies | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+                binding.linearDevice = std::make_shared<DeviceBuffer>(context, colorLayout.LinearBytes(), copies | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+            }
+            const auto tiledBytes = binding.tiled->Bytes().first(static_cast<std::size_t>(colorLayout.Bytes()));
+            GuestMemory::Read(color.address, tiledBytes, colorLayout.Alignment());
+            binding.original.assign(tiledBytes.begin(), tiledBytes.end());
         } else {
             binding.transfer = std::make_unique<Buffer>(context, colorLayout.LinearBytes(), copies);
             ReadColorTarget(color, binding.transfer->Bytes());
@@ -2330,7 +2360,17 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             }
         }
         timer.phase(PhaseReadTarget);
-        binding.target = std::make_unique<RenderTarget>(context, color, state.blends.at(color.exportIndex).blendEnable != 0);
+        const bool blending = state.blends.at(color.exportIndex).blendEnable != 0;
+        if (binding.sharedDevice) {
+            static std::mutex targetMutex;
+            static std::map<std::tuple<VkDevice, std::uint64_t, int, std::uint32_t, std::uint32_t, bool>, std::shared_ptr<RenderTarget>> sharedTargets;
+            std::lock_guard targetLock(targetMutex);
+            auto& shared = sharedTargets[{context.device, color.address, static_cast<int>(color.format), color.extent.width, color.extent.height, blending}];
+            if (shared == nullptr) shared = std::shared_ptr<RenderTarget>(new RenderTarget(context, color, blending), [](RenderTarget*) {});
+            binding.target = shared;
+        } else {
+            binding.target = std::make_shared<RenderTarget>(context, color, blending);
+        }
         targetViews.push_back(binding.target->View());
     }
     if (state.depth) targetViews.push_back(DepthSurfaceView(context, *state.depth, state.depthWrite));
@@ -2676,6 +2716,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         const VkBuffer linear = binding.gpuTiling ? binding.linearDevice->Handle() : binding.transfer->Handle();
         countBarrier(binding.gpuTiling ? 4 : 2);
         if (binding.gpuTiling) {
+            if (binding.sharedDevice) memoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
             CopyBuffer(context, commands, binding.tiled->Handle(), 0, binding.tiledDevice->Handle(), 0, binding.original.size());
             memoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
             context.detiler->Dispatch(commands, TextureTileMode::kR64KBX, binding.color.elementBytes, binding.tiledDevice->Handle(), 0, binding.linearDevice->Handle(), 0, binding.mip, false, 0, false, {.pipeBankXor = binding.color.pipeBankXor});
