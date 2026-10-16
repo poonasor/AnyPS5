@@ -2900,6 +2900,16 @@ void Recorder::OnComplete(std::function<void()> action) {
     writeBackCompletions.fetch_add(1, std::memory_order_acq_rel);
 }
 
+std::uint32_t& Recorder::NoteQueue() {
+    static thread_local std::uint32_t queue = 0xffffu;
+    return queue;
+}
+
+long long Recorder::TraceMicros() {
+    static const auto start = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - start).count();
+}
+
 std::uint64_t& Recorder::NoteProgram() {
     static thread_local std::uint64_t program = 0;
     return program;
@@ -2924,7 +2934,7 @@ bool Recorder::noteWrite(std::uint64_t address, std::size_t bytes, bool ownLabel
             const auto count = RtlCaptureStackBackTrace(1, 8, frames, nullptr);
             const auto base = reinterpret_cast<std::uintptr_t>(GetModuleHandleA("libSceAgcDriver.prx"));
             char line[512];
-            int n = std::snprintf(line, sizeof(line), "[note-watch] 0x%llx+0x%zx value %d label %d program 0x%llx:", static_cast<unsigned long long>(address), bytes, value, ownLabel ? 1 : 0, static_cast<unsigned long long>(NoteProgram()));
+            int n = std::snprintf(line, sizeof(line), "[note-watch] t %lld queue 0x%x 0x%llx+0x%zx value %d label %d program 0x%llx:", TraceMicros(), NoteQueue(), static_cast<unsigned long long>(address), bytes, value, ownLabel ? 1 : 0, static_cast<unsigned long long>(NoteProgram()));
             for (USHORT i = 0; i < count && n > 0 && n < static_cast<int>(sizeof(line)) - 24; ++i) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " +0x%llx", static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(frames[i]) - base));
             std::fprintf(stderr, "%s%c", line, 10);
         }

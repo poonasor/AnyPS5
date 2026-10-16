@@ -2518,6 +2518,8 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
     CompletePendingCpuWrites(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
     if (descriptor.dccAddress != 0) CompletePendingCpuWrites(context, descriptor.dccAddress, DccKeyBytes(guestBytes));
     CaptureTrace::Log("upload image=%llx bytes=%llu generation=%llu reason=%s partial=%d", static_cast<unsigned long long>(descriptor.baseAddress), static_cast<unsigned long long>(guestBytes), static_cast<unsigned long long>(generation), uploadReason, layers != nullptr);
+    static const std::uint64_t traceUploadAddress = [] { const char* text = std::getenv("APS5_EXPERIMENT_TRACE_UPLOAD_ADDR"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
+    if (traceUploadAddress != 0 && descriptor.baseAddress == traceUploadAddress) std::fprintf(stderr, "[upload-trace] t %lld queue 0x%x image 0x%llx %ux%u layers %u reason %s partial %d%c", Recorder::TraceMicros(), Recorder::NoteQueue(), static_cast<unsigned long long>(descriptor.baseAddress), descriptor.width, descriptor.height, arrayLayers, uploadReason, layers != nullptr ? 1 : 0, 10);
     const auto elementBytes = BytesPerElement(descriptor.format);
     const auto linearBytes = sliceLinearBytes * arrayLayers;
     // A layer selection applies to the direct path alone (the others upload everything); it names

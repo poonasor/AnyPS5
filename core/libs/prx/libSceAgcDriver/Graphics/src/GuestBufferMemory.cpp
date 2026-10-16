@@ -1796,7 +1796,14 @@ const HostImport* importRunAt(const Context& context, HostImports& state, Import
         }
         try {
             entry.alias = GuestArena::GuestArenaMapAlias_nid_postfix(static_cast<std::uintptr_t>(base), static_cast<std::size_t>(bytes));
-        } catch (const std::runtime_error&) {
+        } catch (const std::runtime_error& error) {
+            static const bool experimentAliasFailSoft = std::getenv("APS5_EXPERIMENT_ALIAS_FAIL_SOFT") != nullptr;
+            if (entry.ranges.size() == 1 && experimentAliasFailSoft) {
+                static std::atomic<int> reported{0};
+                if (reported.fetch_add(1) < 16) std::fprintf(stderr, "[import] alias refused, import skipped: %s%c", error.what(), 10);
+                failures.insert_or_assign(base, ImportFailure{base, bytes, GuestAllocations::Mapped(entry.ranges.begin(), entry.ranges.end())});
+                return nullptr;
+            }
             if (entry.ranges.size() == 1) throw;
             return joined ? failedImport() : failedBlockImport();
         }

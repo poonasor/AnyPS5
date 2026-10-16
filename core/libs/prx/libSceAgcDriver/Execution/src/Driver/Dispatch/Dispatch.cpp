@@ -172,7 +172,8 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         }
     }
     if (traceUserData != 0 && address == traceUserData && !resolving) {
-        std::fprintf(stderr, "[userdata] program 0x%llx %ux%ux%u flags %08x code", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3], packet.size() > 4 ? packet[4] : 0u);
+        std::fprintf(stderr, "[userdata] t %lld queue 0x%x ", Graphics::Recorder::TraceMicros(), submission.queue);
+        std::fprintf(stderr, "program 0x%llx %ux%ux%u flags %08x code", static_cast<unsigned long long>(address), packet[1], packet[2], packet[3], packet.size() > 4 ? packet[4] : 0u);
         const auto traceCode = std::span(snapshot.code).subspan(codeOffset);
         for (std::size_t word = 0; word < std::min<std::size_t>(traceCode.size(), 64); ++word) std::fprintf(stderr, " %08x", traceCode[word]);
         std::fprintf(stderr, " |");
