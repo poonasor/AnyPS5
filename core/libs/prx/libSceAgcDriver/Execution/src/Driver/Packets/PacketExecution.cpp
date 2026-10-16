@@ -325,7 +325,17 @@ void Driver::execute(const Submission& submission) {
         if (profilePackets) packetProfile.flushMs += std::chrono::duration<double, std::milli>(packetTimer.start - flushStart).count();
 
         bool wroteOnGpu = false, endOfPipeInterrupt = false, interruptDeferred = false, drawPacket = false, sampleDump = false;
+        static const bool traceSlowDma = std::getenv("APS5_EXPERIMENT_TRACE_SLOW_DMA") != nullptr;
+        const auto prepareStart = traceSlowDma ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
         const bool drains = preparePacketMemory(submission, queue, packet, header, opcode, wroteOnGpu, endOfPipeInterrupt, interruptDeferred, drawPacket, sampleDump);
+        if (traceSlowDma && opcode == 0x50) {
+            const auto ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - prepareStart).count();
+            if (ms >= 100.0) {
+                std::fprintf(stderr, "[slow-dma] queue 0x%x %.0f ms gpu %d drains %d words", submission.queue, ms, wroteOnGpu ? 1 : 0, drains ? 1 : 0);
+                for (std::size_t word = 0; word < packet.size() && word < 8; ++word) std::fprintf(stderr, " %08x", packet[word]);
+                std::fprintf(stderr, "%c", 10);
+            }
+        }
         traceLabel(packet, submission.queue);
         timing.Mark("prepare_memory");
 

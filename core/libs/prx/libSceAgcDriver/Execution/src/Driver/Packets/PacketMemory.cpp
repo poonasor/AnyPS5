@@ -113,7 +113,26 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
     }
 
     static const bool cpuStores = std::getenv("APS5_CPU_STORES") != nullptr;
-    if (!drainAll && !cpuStores && (opcode == 0x40 || opcode == 0x50 || opcode == 0x83)) {
+    static const bool experimentGdsGpuCopy = std::getenv("APS5_EXPERIMENT_GDS_GPU_COPY") != nullptr;
+    bool gdsCopied = false;
+    if (experimentGdsGpuCopy && !drainAll && opcode == 0x50 && packet.size() >= 7 && Pm4::DmaDestination(packet) == 1 && (Pm4::DmaSource(packet) == 0 || Pm4::DmaSource(packet) == 3) && packet[5] == 0) {
+        const auto source = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
+        const auto destination = Pm4::GdsAddress() + packet[4];
+        const auto bytes = Pm4::DmaBytes(packet);
+        if (bytes != 0 && bytes % 4 == 0 && source % 4 == 0 && Graphics::Recorder::SnapshotWriteOverlaps(source, bytes) && GuestMemory::Accessible(reinterpret_cast<const void*>(source), bytes) && GuestMemory::Accessible(reinterpret_cast<const void*>(destination), bytes, true)) {
+            GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Copy);
+            std::lock_guard gpuLock(GuestMemory::GpuMutex());
+            if (const auto localDevice = device.Load()) {
+                recordDeferredLabels(localDevice.get(), submission.queue);
+                const auto outcome = localDevice->CopyBuffer(destination, source, bytes, 0, std::numeric_limits<std::size_t>::max(), 0, 0, submission.queue, [](std::span<const std::byte>, std::uint64_t) {});
+                if (outcome.path == 1 || outcome.path == 3) {
+                    wroteOnGpu = true;
+                    gdsCopied = true;
+                }
+            }
+        }
+    }
+    if (!gdsCopied && !drainAll && !cpuStores && (opcode == 0x40 || opcode == 0x50 || opcode == 0x83)) {
         constexpr std::size_t gpuStoreLimit = 65536;
         bool drained = true;
         const auto copy = opcode == 0x50 ? Pm4::DecodeMemoryCopy(packet) : std::nullopt;
@@ -230,6 +249,31 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
         GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Flush);
         std::lock_guard gpuLock(GuestMemory::GpuMutex());
         static_cast<void>(Graphics::StorageTexture::StoreSmallPending("flip"));
+        static const std::vector<std::pair<std::uint64_t, std::uint32_t>> printWords = [] {
+            std::vector<std::pair<std::uint64_t, std::uint32_t>> parsed;
+            const char* text = std::getenv("APS5_EXPERIMENT_PRINT_WORDS");
+            while (text != nullptr && *text != 0) {
+                char* end = nullptr;
+                const auto address = std::strtoull(text, &end, 16);
+                std::uint32_t count = 4;
+                if (*end == ':') count = static_cast<std::uint32_t>(std::strtoul(end + 1, &end, 10));
+                parsed.emplace_back(address, std::min<std::uint32_t>(count, 64));
+                text = *end == ',' ? end + 1 : nullptr;
+            }
+            return parsed;
+        }();
+        static std::uint64_t flipCount = 0;
+        if (!printWords.empty() && (++flipCount % 4) == 0) {
+            if (auto* recorder = Graphics::Recorder::Active()) recorder->Sync();
+            for (const auto& [address, count] : printWords) {
+                if (!GuestMemory::Accessible(reinterpret_cast<const void*>(address), count * 4u)) continue;
+                std::vector<float> words(count);
+                GuestMemory::Read(address, std::as_writable_bytes(std::span(words)), 4);
+                std::fprintf(stderr, "[words] flip %llu 0x%llx:", static_cast<unsigned long long>(flipCount), static_cast<unsigned long long>(address));
+                for (const auto value : words) std::fprintf(stderr, " %.4g", value);
+                std::fprintf(stderr, "%c", 10);
+            }
+        }
     }
 
     static const bool syncFlip = std::getenv("APS5_SYNC_FLIP") != nullptr;
