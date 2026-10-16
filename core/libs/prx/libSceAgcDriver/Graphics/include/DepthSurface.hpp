@@ -15,6 +15,9 @@ class Texture;
 class StorageTexture;
 
 VkImageView DepthSurfaceView(const Context& context, const DepthTarget& target);
+void NoteWordFill(std::uint64_t address, std::size_t bytes, std::uint32_t word, std::uint64_t generation);
+void NoteHtileClearRecorded(std::uint64_t htileAddress, std::size_t bytes);
+std::optional<std::uint32_t> KnownWordFill(std::uint64_t address, std::size_t bytes);
 bool SampleLocationsCompatibleDepth(const Context& context, VkFormat format, std::uint32_t samples);
 std::uint64_t DepthSurfacesSerial();
 std::uint64_t DepthSliceBytes(VkExtent2D extent, std::uint32_t bytesPerTexel);

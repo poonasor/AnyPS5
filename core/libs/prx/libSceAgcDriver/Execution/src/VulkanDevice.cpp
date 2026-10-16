@@ -2145,6 +2145,21 @@ bool VulkanDevice::DumpSamplesOnGpu(std::uint64_t address) {
     return true;
 }
 
+namespace {
+bool watchedNote(std::uint64_t address, std::size_t bytes) {
+    static const auto watch = []() -> std::pair<std::uint64_t, std::uint64_t> {
+        const char* text = std::getenv("APS5_EXPERIMENT_WATCH_NOTES");
+        if (text == nullptr) return {0, 0};
+        char* rest = nullptr;
+        const auto lo = std::strtoull(text, &rest, 16);
+        const auto hi = rest != nullptr && *rest == ':' ? std::strtoull(rest + 1, nullptr, 16) : lo + 1;
+        return {lo, hi};
+    }();
+    static std::atomic<int> printed{0};
+    return watch.second > watch.first && address < watch.second && watch.first < address + bytes && printed.fetch_add(1) < 300;
+}
+}
+
 bool VulkanDevice::FillBuffer(std::uint64_t address, std::size_t bytes, std::span<const std::uint32_t, 4> pattern) {
     if (!state->recorder || bytes == 0 || bytes % 16 != 0 || address % 16 != 0) return false;
     auto& recorder = *state->recorder;
@@ -2155,6 +2170,23 @@ bool VulkanDevice::FillBuffer(std::uint64_t address, std::size_t bytes, std::spa
     if (OpportunisticReap()) recorder.Reap();
     const auto context = graphicsContext();
     const Graphics::HostImport* import = Graphics::HostImportFor(context, address, bytes);
+    static const bool experimentSplitFills = std::getenv("APS5_EXPERIMENT_SPLIT_FILLS") != nullptr;
+    if (import == nullptr && experimentSplitFills && bytes > 16) {
+        std::vector<std::pair<std::uint64_t, std::size_t>> pieces;
+        for (auto at = address; at < address + bytes;) {
+            const auto* piece = Graphics::HostImportFor(context, at, 16);
+            if (piece == nullptr || piece->base > at || piece->base + piece->bytes <= at) return false;
+            const auto end = std::min<std::uint64_t>(address + bytes, piece->base + piece->bytes);
+            if ((end - at) % 16 != 0 && end != address + bytes) return false;
+            pieces.emplace_back(at, static_cast<std::size_t>(end - at));
+            at = end;
+        }
+        if (pieces.size() < 2) return false;
+        for (const auto& [at, length] : pieces) {
+            if (!FillBuffer(at, length, pattern)) return false;
+        }
+        return true;
+    }
     if (import == nullptr) return false;
     // Earlier recorded work that stores into the range must land before the fill, or it would
     // overwrite the fill later. Stores the GPU makes (direct dispatch writes, GPU labels, earlier
@@ -2320,9 +2352,11 @@ bool VulkanDevice::FillBuffer(std::uint64_t address, std::size_t bytes, std::spa
     recorder.EndGpuTiming(timing, bytes);
     recorder.MarkCovered(filledAccess);
     phase(recordMs);
+    if (watchedNote(address, bytes)) std::fprintf(stderr, "[note-src] fill 0x%llx+0x%zx pattern %08x %08x %08x %08x%c", static_cast<unsigned long long>(address), bytes, pattern[0], pattern[1], pattern[2], pattern[3], 10);
     if (uniform && pattern[0] == (pattern[0] & 0xffu) * 0x01010101u) recorder.NotePendingFill(address, bytes, static_cast<std::uint8_t>(pattern[0]));
     else recorder.NotePendingWrite(address, bytes);
-    GuestMemory::MarkWritten(address, bytes);
+    const auto filledGeneration = GuestMemory::MarkWritten(address, bytes);
+    if (uniform) Graphics::NoteWordFill(address, bytes, pattern[0], filledGeneration);
     phase(notesMs);
     return true;
 }
@@ -2503,6 +2537,7 @@ VulkanDevice::CopyOutcome VulkanDevice::CopyBuffer(std::uint64_t destination, st
     // A whole surface copied into another: a device copy between their images, whose results reach
     // the destination's memory through the image's deferred write-back (nothing crosses to host
     // memory for the copy itself).
+    if (watchedNote(destination, bytes)) std::fprintf(stderr, "[note-src] copy 0x%llx+0x%zx from 0x%llx program 0x%llx%c", static_cast<unsigned long long>(destination), bytes, static_cast<unsigned long long>(source), static_cast<unsigned long long>(programAddress), 10);
     if (AliasCopy(context, destination, source, bytes)) {
         noteWriter({}, 0);
         recorder.NotePendingWrite(destination, bytes);
@@ -4244,6 +4279,17 @@ std::uint64_t VulkanDevice::presync(std::span<const std::pair<std::uint64_t, std
             if (open) serial = state->recorder->SubmitAndEpoch();
         }
     }
+    static const bool tracePresync = std::getenv("APS5_EXPERIMENT_TRACE_PRESYNC") != nullptr;
+    if (tracePresync && serial != 0) {
+        static std::atomic<int> traced{0};
+        if (traced.fetch_add(1) < 300) {
+            std::fprintf(stderr, "[presync-trace] serial %llu surfaces:", static_cast<unsigned long long>(serial));
+            for (const auto& [address, bytes] : surfaces) {
+                if (Graphics::Recorder::SnapshotWriteOverlaps(address, static_cast<std::size_t>(bytes))) std::fprintf(stderr, " 0x%llx+0x%llx", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes));
+            }
+            std::fprintf(stderr, "%c", 10);
+        }
+    }
     if (serial != 0) {
         const auto waitStart = std::chrono::steady_clock::now();
         WaitRecorded(serial);
@@ -4579,7 +4625,9 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
     recorder.EndGpuTiming(trailingTiming);
     recorder.MarkCovered(dispatchedAccess);
     recordStep(PhaseRecordBind);
+    Graphics::Recorder::NoteProgram() = record.programAddress;
     resources.MarkGpuWrites(recorder);
+    Graphics::Recorder::NoteProgram() = 0;
     recordStep(PhaseRecordMarks);
     // Only copied written buffers (and BDA fault checks) need work once the GPU is done; without them
     // the batch can signal its labels from the GPU.

@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/DccMetadata.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
@@ -254,7 +255,8 @@ bool StoreUncompressedOnGpu(const Context& context, Recorder& recorder, std::uin
     // a later command writing the keys; see Recorder::QueueKeyStore).
     recorder.QueueKeyStore(import->buffer, first, last, std::move(seed), begin, begin + count);
     recorder.NotePendingFill(begin, count, 0xff);
-    GuestMemory::MarkWritten(begin, count);
+    const auto storedGeneration = GuestMemory::MarkWritten(begin, count);
+    NoteWordFill(begin, count, 0xffffffffu, storedGeneration);
     // After the note: an unlocked memo lookup drops an entry the snapshot does not cover yet. The
     // entry is kept only for the active recorder (the one the flush hook and the lookups consult).
     {
