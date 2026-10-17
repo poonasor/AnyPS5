@@ -937,11 +937,23 @@ void KeepDrawInput(Recorder* recorder, std::uint64_t address, const DrawInputCop
     recorder->KeepDrawSnapshot(address, copy.buffer->Bytes().size(), copy.generation, copy.registryGeneration, copy.buffer, use, derived);
 }
 
-const HostImport* InPlaceDrawInput(const Context& context, std::uint64_t address, std::size_t bytes, std::size_t alignment) {
+namespace {
+// Set when InPlaceDrawInput bound an input under a pending GPU write (prepareDrawInputs reads it).
+thread_local bool gpuOrderedInputBound = false;
+}
+
+const HostImport* InPlaceDrawInput(const Context& context, std::uint64_t address, std::size_t bytes, std::size_t alignment, bool gpuOrderedWrites) {
     auto* recorder = context.recorder;
     if (recorder == nullptr || bytes == 0) return nullptr;
-    GuestMemory::FlushGpuWrites(address, bytes);
-    if (recorder->PendingWriteOverlaps(address, bytes) || recorder->PendingLabelIn(address, bytes) || recorder->QueuedStoreOverlaps(address, bytes)) return nullptr;
+    // APS5_EXPERIMENT_GPU_VERTEX_INPUT (fork): a vertex input under a pending GPU write of the
+    // recorded work is bound in place without waiting; the draw's start barrier orders the read
+    // after that write on the GPU. Labels, queued stores and pending storage images still wait.
+    static const bool gpuVertexInput = std::getenv("APS5_EXPERIMENT_GPU_VERTEX_INPUT") != nullptr;
+    const std::pair<std::uint64_t, std::uint64_t> range{address, address + bytes};
+    const bool ordered = gpuOrderedWrites && gpuVertexInput && recorder->PendingWriteOverlaps(address, bytes) && !recorder->PendingLabelIn(address, bytes) && !recorder->QueuedStoreOverlaps(address, bytes) && !StorageTexture::AnyPendingOverlaps(std::span(&range, 1));
+    if (!ordered) GuestMemory::FlushGpuWrites(address, bytes);
+    else gpuOrderedInputBound = true;
+    if ((!ordered && recorder->PendingWriteOverlaps(address, bytes)) || recorder->PendingLabelIn(address, bytes) || recorder->QueuedStoreOverlaps(address, bytes)) return nullptr;
     const auto overlaps = [&](const auto& writer) { return writer->WritesOverlap(address, bytes); };
     if (context.copiedWriters != nullptr && std::any_of(context.copiedWriters->begin(), context.copiedWriters->end(), overlaps)) return nullptr;
     const auto drawWriters = DrawCopiedWriters();
@@ -994,6 +1006,8 @@ struct DrawInputs {
     VkPipelineStageFlags shaderStages = 0;
     std::uint32_t meshGroups = 0;
     std::vector<std::uint32_t> restartTable;
+    // An input bound in place under a pending GPU write: the draw starts a new pass with a barrier.
+    bool gpuOrdered = false;
     const VertexInputLayout& VertexLayout() const { return retainedVertexInput != nullptr ? *retainedVertexInput : vertexInput; }
 };
 
@@ -1192,7 +1206,9 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
         const auto [begin, end] = plan.copies[range];
         const auto bytes = static_cast<std::size_t>(end - begin);
         GuestMemory::CheckRange(reinterpret_cast<const void*>(begin), bytes, 1);
-        if (const auto* import = InPlaceDrawInput(context, begin, bytes, plan.alignments[range])) {
+        gpuOrderedInputBound = false;
+        if (const auto* import = InPlaceDrawInput(context, begin, bytes, plan.alignments[range], true)) {
+            inputs.gpuOrdered = inputs.gpuOrdered || gpuOrderedInputBound;
             rangeHandles.push_back(import->buffer);
             rangeOffsets.push_back(begin - import->base);
             inputs.inPlaceReads.emplace_back(begin, end);
@@ -1766,7 +1782,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     const bool unknownMemory = addressBased || resources.UsesAddressTable() || resources.HasCopiedWrites();
     const PassAccess passAccess{passReads, resources.GpuWrites(), passImages, passAttachments, unknownMemory, unknownMemory};
     const bool fenced = state.depth.has_value() || !record.proxies.empty();
-    const auto start = recorder->StartDrawPass(passKey, capture || readsTarget || gpuIndirect || meshIndirect, fenced, passAccess);
+    const auto start = recorder->StartDrawPass(passKey, capture || readsTarget || gpuIndirect || meshIndirect || inputs.gpuOrdered, fenced, passAccess);
     const bool continued = start.continued;
     outcome.passContinued = continued;
     outcome.passBegun = !continued;
