@@ -5134,7 +5134,14 @@ void VulkanDevice::recordDispatch(RecordedDispatch& record) {
             kept->WriteBackBuffers();
         });
         // Listed after the registration: a throw there leaves nothing that would pin the CPU path forever.
-        if (resources.HasCopiedWrites()) writers->push_back(kept);
+        if (resources.HasCopiedWrites()) {
+            writers->push_back(kept);
+            static const bool traceCopiedWriters = std::getenv("APS5_EXPERIMENT_TRACE_COPIED_WRITERS") != nullptr;
+            if (traceCopiedWriters) {
+                static std::set<std::uint64_t> seen;
+                if (seen.size() < 200 && seen.insert(record.programAddress).second) std::fprintf(stderr, "[copied-writer] program 0x%llx:%s%c", static_cast<unsigned long long>(record.programAddress), resources.DescribeCopiedWrites().c_str(), 10);
+            }
+        }
     }
     recordStep(PhaseRecordCompletion);
 }

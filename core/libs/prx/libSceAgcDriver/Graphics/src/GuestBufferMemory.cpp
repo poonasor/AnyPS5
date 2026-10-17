@@ -5312,6 +5312,22 @@ bool GuestBufferMemory::HasCopiedWrites() const {
     return false;
 }
 
+std::string GuestBufferMemory::DescribeCopiedWrites() const {
+    std::string text;
+    for (const auto& [begin, end] : writes) {
+        const auto* found = owner(begin);
+        if (found == nullptr) continue;
+        const auto& region = *found;
+        if (region.direct != nullptr) continue;
+        if (region.gpuCopy && (region.copiedBack || region.deviceLocal)) continue;
+        if (region.mirror != nullptr && !region.mirror->writable) continue;
+        char item[200];
+        std::snprintf(item, sizeof(item), " [write 0x%llx+0x%llx region 0x%llx+0x%llx writable %d hostBacked %d sparse %d gpuCopy %d deviceLocal %d mirror %d]", static_cast<unsigned long long>(begin), static_cast<unsigned long long>(end - begin), static_cast<unsigned long long>(region.begin), static_cast<unsigned long long>(region.end - region.begin), region.writable ? 1 : 0, region.hostBacked ? 1 : 0, region.sparse ? 1 : 0, region.gpuCopy ? 1 : 0, region.deviceLocal ? 1 : 0, region.mirror != nullptr ? 1 : 0);
+        text += item;
+    }
+    return text;
+}
+
 bool GuestBufferMemory::CopiedWritesOverlap(std::uint64_t address, std::size_t bytes) const {
     if (bytes == 0) return false;
     for (const auto& [begin, end] : writes) {

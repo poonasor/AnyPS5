@@ -119,7 +119,15 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
         const auto source = packet[2] | (static_cast<std::uint64_t>(packet[3]) << 32u);
         const auto destination = Pm4::GdsAddress() + packet[4];
         const auto bytes = Pm4::DmaBytes(packet);
-        if (bytes != 0 && bytes % 4 == 0 && source % 4 == 0 && Graphics::Recorder::SnapshotWriteOverlaps(source, bytes) && GuestMemory::Accessible(reinterpret_cast<const void*>(source), bytes) && GuestMemory::Accessible(reinterpret_cast<const void*>(destination), bytes, true)) {
+        bool sourcePending = Graphics::Recorder::SnapshotWriteOverlaps(source, bytes);
+        if (!sourcePending) {
+            GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Copy);
+            std::lock_guard gpuLock(GuestMemory::GpuMutex());
+            if (auto* recorder = Graphics::Recorder::Active()) sourcePending = recorder->PendingWriteOverlaps(source, bytes) || recorder->PendingLabelIn(source, bytes);
+        }
+        static std::atomic<int> skipped{0};
+        if (!sourcePending && skipped.fetch_add(1) < 20) std::fprintf(stderr, "[gds-copy] source 0x%llx has no pending GPU write or label (store path)%c", static_cast<unsigned long long>(source), 10);
+        if (bytes != 0 && bytes % 4 == 0 && source % 4 == 0 && sourcePending && GuestMemory::Accessible(reinterpret_cast<const void*>(source), bytes) && GuestMemory::Accessible(reinterpret_cast<const void*>(destination), bytes, true)) {
             GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Copy);
             std::lock_guard gpuLock(GuestMemory::GpuMutex());
             if (const auto localDevice = device.Load()) {
@@ -128,6 +136,9 @@ bool Driver::preparePacketMemory(const Submission& submission, QueueState& queue
                 if (outcome.path == 1 || outcome.path == 3) {
                     wroteOnGpu = true;
                     gdsCopied = true;
+                } else {
+                    static std::atomic<int> traced{0};
+                    if (traced.fetch_add(1) < 50) std::fprintf(stderr, "[gds-copy] refused: source 0x%llx dest 0x%llx bytes %zu path %d reason %d%c", static_cast<unsigned long long>(source), static_cast<unsigned long long>(destination), static_cast<std::size_t>(bytes), outcome.path, static_cast<int>(outcome.reason), 10);
                 }
             }
         }
