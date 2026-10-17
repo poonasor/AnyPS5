@@ -3,6 +3,7 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Synchronization/DeferredLabels.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferCopy.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -10,7 +11,9 @@
 #include "prx/libSceAgcDriver/Graphics/include/DepthSurface.hpp"
 #include "Optimization/ResourceProgram.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <stdexcept>
 
 namespace AgcDriver::DriverDetail {
@@ -73,6 +76,13 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         partialGroups = Pm4::PartialGroupThreads({packet[1], packet[2], packet[3]}, {readRegister(queue.shader, 0x207), readRegister(queue.shader, 0x208), readRegister(queue.shader, 0x209)});
     }
     const bool partialLastGroup = partialGroups != std::array<std::uint32_t, 3>{};
+    static const bool experimentPipelineDispatch = std::getenv("APS5_EXPERIMENT_PIPELINE_DISPATCH") != nullptr;
+    bool drainDeferred = false;
+    const auto drainNow = [&] {
+        if (!drainDeferred) return;
+        drainDeferred = false;
+        DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Packet, 0x15);
+    };
     if (resolving) {
         if (!partialLastGroup && matchesFillKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute)) return;
         if (!partialLastGroup && indirectArguments == 0 && (matchesCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute) || MatchesStreamCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute))) return;
@@ -84,12 +94,15 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
             pendingDispatchPhases().outcome = DispatchOutcome::FillHle;
             return;
         }
-        if (DrawPipeline::Active()) DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Packet, 0x15);
+        drainDeferred = experimentPipelineDispatch && DrawPipeline::Active() && indirectArguments == 0;
+        if (DrawPipeline::Active() && !drainDeferred) DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Packet, 0x15);
         if (const auto htile = Graphics::HtileDepthClearAddress(std::span(snapshot.code).subspan(codeOffset), userData, compute.numThreads); htile != 0) {
+            drainNow();
             const auto threads = (packet[4] & 0x20u) != 0 ? static_cast<std::uint64_t>(packet[1]) : static_cast<std::uint64_t>(packet[1]) * compute.numThreads[0];
             const auto nativeBytes = Graphics::HtileDepthClearBytes_nid_no_patch(std::span(snapshot.code).subspan(codeOffset), userData, compute, packet, indirectArguments);
             Graphics::NoteHtileDepthClear(htile, static_cast<std::size_t>(threads * 16u), nativeBytes);
         }
+        if (drainDeferred && (matchesCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute) || MatchesStreamCopyKernel(std::span(snapshot.code).subspan(codeOffset), userData, compute))) drainNow();
         if (!partialLastGroup && indirectArguments == 0 && copyBuffer(queue, submission.queue, packet, std::span(snapshot.code).subspan(codeOffset), userData, compute, localDevice, address)) {
             pendingDispatchPhases().outcome = DispatchOutcome::CopyHle;
             return;
@@ -375,6 +388,72 @@ void Driver::dispatch(QueueState& queue, std::span<const std::uint32_t> packet, 
         }
     }
     const std::uint64_t dispatchThreads = indirectArguments != 0 ? 0 : std::uint64_t{groups[0]} * groups[1] * groups[2] * compute.numThreads[0] * compute.numThreads[1] * compute.numThreads[2];
+    if (drainDeferred) {
+        const bool overlapsQueued = std::any_of(captured.begin(), captured.end(), [](const ShaderRecompiler::MemoryRegion& region) { return DrawPipeline::Queue0().Overlaps(region.guestAddress, region.bytes.size()); });
+        const bool usesBdaTable = std::any_of(compiled.bindings.begin(), compiled.bindings.end(), [](const ShaderRecompiler::DescriptorBinding& binding) { return binding.role == ShaderRecompiler::DescriptorRole::BdaPagetable; });
+        const bool labelsPending = !deferredLabels().labels.empty();
+        const bool evidence = writeEvidenceEnabled() || traceCapSync();
+        const bool eligible = !overlapsQueued && !usesBdaTable && !labelsPending;
+        static std::uint64_t pipelined = 0, overlapCount = 0, bdaCount = 0, labelCount = 0, evidenceCount = 0;
+        if (eligible) ++pipelined;
+        if (overlapsQueued) ++overlapCount;
+        if (usesBdaTable) ++bdaCount;
+        if (labelsPending) ++labelCount;
+        if (evidence) ++evidenceCount;
+        if (((pipelined + overlapCount + bdaCount + labelCount) & 1023u) == 0) std::fprintf(stderr, "[pipedisp] pipelined %llu, drained because: input overlaps queued writes %llu, address-based %llu, labels pending %llu, evidence %llu%c", static_cast<unsigned long long>(pipelined), static_cast<unsigned long long>(overlapCount), static_cast<unsigned long long>(bdaCount), static_cast<unsigned long long>(labelCount), static_cast<unsigned long long>(evidenceCount), 10);
+        if (!eligible) {
+            drainNow();
+            if (overlapsQueued) {
+                dispatch(queue, packet, submission, indirectArguments);
+                return;
+            }
+        } else {
+            const std::array<Graphics::CompiledShader, 1> stage{Graphics::CompiledShader{ShaderRecompiler::ShaderStage::Compute, &compiled, 0}};
+            auto writes = drawWriteRanges(Graphics::State{}, stage);
+            const auto commitQueue = submission.queue;
+            const auto epoch = DrawPipeline::EpochToken().load(std::memory_order_relaxed);
+            auto commit = [this, localDevice, compiledResult, snapshots, dispatchThreads, address, groups, commitQueue, epoch, knownAfter, knownBase, knownBytes] {
+                DrawPipeline::FollowEpoch(epoch);
+                GuestMemory::SetCurrentPacket(0x15, commitQueue);
+                auto device = localDevice;
+                try {
+                    auto prepared = device->PrepareDispatch(*compiledResult, snapshots, dispatchThreads, address);
+                    GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Dispatch);
+                    std::lock_guard gpuLock(GuestMemory::GpuMutex());
+                    if (auto current = this->device.Load(); current != nullptr && current != device) device = std::move(current);
+                    struct SubmitDue {
+                        Driver& driver;
+                        const std::shared_ptr<VulkanDevice>& device;
+                        ~SubmitDue() noexcept(false) {
+                            if (std::uncaught_exceptions() == 0) driver.submitDueAfterCommit(device.get());
+                        }
+                    } submitDue{*this, device};
+                    recordLabelsForPacket(device.get(), commitQueue);
+                    const bool noteWrites = writeEvidenceEnabled() || traceCapSync();
+                    if (noteWrites && writerKeyedEvidence()) noteWrittenBuffers(address, commitQueue, *compiledResult);
+                    device->Dispatch(*compiledResult, groups[0], groups[1], groups[2], snapshots, address, std::move(prepared), nullptr);
+                    if (noteWrites && !writerKeyedEvidence()) noteWrittenBuffers(address, commitQueue, *compiledResult);
+                    if (knownAfter) Graphics::NoteWordFill(knownBase, knownBytes, *knownAfter, GuestMemory::CollectWrites(knownBase, knownBytes));
+                } catch (const std::exception& error) {
+                    char where[64];
+                    std::snprintf(where, sizeof(where), "compute shader 0x%llx: ", static_cast<unsigned long long>(address));
+                    throw std::runtime_error(where + std::string(error.what()));
+                }
+            };
+            auto held = std::make_shared<decltype(commit)>(std::move(commit));
+            DrawPipeline::Queue0().Enqueue([held] { (*held)(); }, std::move(writes));
+            if (profile) {
+                auto& pending = pendingDispatchPhases();
+                pending.outcome = DispatchOutcome::Real;
+                pending.phases = true;
+                pending.hit = cached;
+                pending.validated = validated;
+                pending.ms = phaseMs;
+                pending.tailAt = phaseLap;
+            }
+            return;
+        }
+    }
     static const bool traceIo = std::getenv("APS5_TRACE_DISPATCH_IO") != nullptr;
     if (traceIo) {
 
