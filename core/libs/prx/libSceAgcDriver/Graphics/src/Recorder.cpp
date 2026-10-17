@@ -830,12 +830,38 @@ public:
             before.resize(bytes);
             std::memcpy(before.data(), reinterpret_cast<const void*>(address), bytes);
         }
+        static const double slowMs = [] {
+            const char* value = std::getenv("APS5_EXPERIMENT_HOOKSYNC_STACK_MS");
+            return value != nullptr ? std::atof(value) : -1.0;
+        }();
+        if (slowMs >= 0) rawFrames = RtlCaptureStackBackTrace(0, static_cast<DWORD>(std::size(raw)), raw, nullptr);
         start = std::chrono::steady_clock::now();
     }
     ~HookSyncScope() {
         if (!enabled) return;
         const auto now = std::chrono::steady_clock::now();
         const auto ms = std::chrono::duration<double, std::milli>(now - start).count();
+        if (rawFrames != 0) {
+            static const double slowMs = std::atof(std::getenv("APS5_EXPERIMENT_HOOKSYNC_STACK_MS"));
+            if (ms >= slowMs) {
+                std::string text;
+                char item[96];
+                std::snprintf(item, sizeof(item), "[hooksync-stack] %.1f ms access 0x%llx+%zu site %s:", ms, static_cast<unsigned long long>(address), bytes, GuestMemory::ReadSiteName(key.site));
+                text += item;
+                for (USHORT i = 0; i < rawFrames; ++i) {
+                    HMODULE module = nullptr;
+                    char name[MAX_PATH] = "?";
+                    if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, static_cast<LPCSTR>(raw[i]), &module) && module != nullptr) {
+                        GetModuleFileNameA(module, name, sizeof(name));
+                    }
+                    const char* base = std::strrchr(name, '\\');
+                    std::snprintf(item, sizeof(item), " %s+0x%llx", base != nullptr ? base + 1 : name, static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(raw[i]) - reinterpret_cast<std::uintptr_t>(module)));
+                    text += item;
+                }
+                text += "\n";
+                AgcDriver::ProfilePrint_nid_no_patch("%s", text.c_str());
+            }
+        }
         auto& stats = HookSyncs();
         auto& totals = stats.byKey[key];
         ++totals.count;
@@ -878,6 +904,8 @@ private:
     HookSyncKey key{};
     std::vector<std::byte> before;
     std::chrono::steady_clock::time_point start;
+    void* raw[24]{};
+    USHORT rawFrames = 0;
 };
 
 // Attribution of the hook's recorded-store syncs (source 2: a pending image's write-back or a unit
