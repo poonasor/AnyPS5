@@ -2544,6 +2544,29 @@ void StorageTexture::upload(const std::vector<bool>* layers) {
         refreshGeneration();
     };
     uploadedKeys = ProvedClearKeys(descriptor, guestBytes, keyProof);
+    if (traceUploadAddress != 0 && descriptor.baseAddress == traceUploadAddress) {
+        // Content of the guest bytes the upload reads: zero dwords and a checksum per layer.
+        std::string layersText;
+        for (std::uint32_t layer = 0; layer < trackedLayers && layer < 6; ++layer) {
+            std::vector<std::uint32_t> words(static_cast<std::size_t>(std::min<std::uint64_t>(layerBytes(layer), 1u << 20u) / 4u));
+            GuestMemory::ReadCommitted(layerBegin(layer), std::as_writable_bytes(std::span(words)));
+            std::uint64_t zero = 0, sum = 0;
+            for (const auto word : words) {
+                zero += word == 0;
+                sum = sum * 31u + word;
+            }
+            char item[64];
+            std::snprintf(item, sizeof(item), " L%u zero %.0f%% sum %08llx", layer, words.empty() ? 0.0 : 100.0 * static_cast<double>(zero) / static_cast<double>(words.size()), static_cast<unsigned long long>(sum & 0xffffffffu));
+            layersText += item;
+        }
+        const std::pair<std::uint64_t, std::uint64_t> whole{descriptor.baseAddress, descriptor.baseAddress + guestBytes};
+        const bool gpuPending = Recorder::SnapshotWriteOverlaps(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
+        bool openPending = false;
+        std::lock_guard gpuLock(GuestMemory::GpuMutex());
+        if (auto* recorder = Recorder::Active()) openPending = recorder->PendingWriteOverlaps(descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) || recorder->QueuedStoreOverlaps(descriptor.baseAddress, static_cast<std::size_t>(guestBytes));
+        const bool imagesPending = StorageTexture::AnyPendingOverlaps(std::span(&whole, 1));
+        std::fprintf(stderr, "[upload-trace] keys %d dcc 0x%llx import %d format %u tracked %u pending gpu %d open %d images %d:%s%c", static_cast<int>(uploadedKeys), static_cast<unsigned long long>(descriptor.dccAddress), HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes)) != nullptr ? 1 : 0, static_cast<unsigned>(descriptor.format), trackedLayers, gpuPending ? 1 : 0, openPending ? 1 : 0, imagesPending ? 1 : 0, layersText.c_str(), 10);
+    }
     filledKeys = DccKeys::Uncompressed;
     VkClearColorValue clearValue{};
     if (IsDccClear(uploadedKeys) && ClearColorFor(storageFormat, uploadedKeys, clearValue)) {
