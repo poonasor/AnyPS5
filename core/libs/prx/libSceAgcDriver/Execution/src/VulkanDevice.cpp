@@ -4703,7 +4703,7 @@ std::uint64_t VulkanDevice::presync(std::span<const Graphics::PresyncSurface> su
         static std::atomic<int> traced{0};
         if (traced.fetch_add(1) < 300) {
             std::fprintf(stderr, "[presync-trace] serial %llu surfaces:", static_cast<unsigned long long>(serial));
-            for (const auto& [address, bytes] : surfaces) {
+            for (const auto& [address, bytes, keys] : surfaces) {
                 if (Graphics::Recorder::SnapshotWriteOverlaps(address, static_cast<std::size_t>(bytes))) std::fprintf(stderr, " 0x%llx+0x%llx", static_cast<unsigned long long>(address), static_cast<unsigned long long>(bytes));
             }
             std::fprintf(stderr, "%c", 10);

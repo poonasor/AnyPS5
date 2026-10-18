@@ -1810,8 +1810,7 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allo
         static bool reported = false;
         if (!reported) {
             reported = true;
-            std::fprintf(stderr, "[gpu] CMASK fast clears of 3D, array and 8/16 bpp mipmapped color targets are ignored (first: 0x%llx, %ux%u, %u mips, slice %u%s)
-", static_cast<unsigned long long>(color.surfaceAddress), color.surfaceExtent.width, color.surfaceExtent.height, maxMip + 1u, slice, volume ? ", 3D" : "");
+            std::fprintf(stderr, "[gpu] CMASK fast clears of 3D, array and 8/16 bpp mipmapped color targets are ignored (first: 0x%llx, %ux%u, %u mips, slice %u%s)\n", static_cast<unsigned long long>(color.surfaceAddress), color.surfaceExtent.width, color.surfaceExtent.height, maxMip + 1u, slice, volume ? ", 3D" : "");
         }
     } else if (((info & 0x2000u) != 0 || (color.samples > 1 && (info & 0x4000u) != 0)) && (color.samples > 1 || viewMip == 0)) {
         Require(color.samples > 1 || (!volume && slice == 0 && color.arrayLastSlice == 0), "CMASK fast clears of a 3D or array color target are unsupported");

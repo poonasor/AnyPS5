@@ -5315,7 +5315,7 @@ bool GuestBufferMemory::HasCopiedWrites() const {
 std::string GuestBufferMemory::DescribeCopiedWrites() const {
     std::string text;
     for (const auto& [begin, end] : writes) {
-        const auto* found = owner(begin);
+        const auto* found = owner(begin, end);
         if (found == nullptr) continue;
         const auto& region = *found;
         if (region.direct != nullptr) continue;
