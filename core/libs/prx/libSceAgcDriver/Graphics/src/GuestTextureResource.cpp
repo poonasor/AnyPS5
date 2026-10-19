@@ -168,7 +168,7 @@ GuestTextureResource DecodeTextureResource(std::span<const std::uint32_t> words)
     if (XorSwizzleMode(tileMode) != 0) {
         pipeBankXor = static_cast<std::uint32_t>(baseAddress & (tileMode == TextureTileMode::kS4KBX || tileMode == TextureTileMode::kD4KBX ? 0xfffu : 0xffffu));
         baseAddress -= pipeBankXor;
-        Require(baseAddress != 0, "guest texture descriptor has a null base address");
+        Require(baseAddress != 0, "guest texture descriptor has a null base address" + describe());
     }
 
     switch (dimension) {
