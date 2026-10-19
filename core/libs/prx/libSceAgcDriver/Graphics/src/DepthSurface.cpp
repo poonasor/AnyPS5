@@ -1443,6 +1443,60 @@ bool RoutesToNativeDepthOwner(const DepthTarget& target) {
     return std::ranges::any_of(depthGuards(), [&](const auto& range) { return range.active->load(std::memory_order_acquire) && target.htileAddress < range.address + range.bytes && range.address < target.htileAddress + bytes; });
 }
 
+struct WordFill {
+    std::size_t bytes = 0;
+    std::uint32_t word = 0;
+    std::uint64_t generation = 0;
+};
+
+bool htileFillKnown() {
+    static const bool enabled = std::getenv("APS5_EXPERIMENT_HTILE_FILL_KNOWN") != nullptr;
+    return enabled;
+}
+
+std::mutex& wordFillsMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::map<std::uint64_t, WordFill>& wordFills() {
+    static std::map<std::uint64_t, WordFill> fills;
+    return fills;
+}
+
+std::optional<std::uint32_t> knownFillWord(std::uint64_t address, std::size_t bytes) {
+    std::lock_guard lock(wordFillsMutex());
+    auto& fills = wordFills();
+    auto found = fills.upper_bound(address);
+    static const bool trace = std::getenv("APS5_EXPERIMENT_TRACE_HTILE_SYNC") != nullptr;
+    static int traced = 0;
+    const auto miss = [&](const char* why) -> std::optional<std::uint32_t> {
+        if (trace && traced++ < 200) std::fprintf(stderr, "[htile-known] 0x%llx+0x%zx miss: %s (%zu fills)\n", static_cast<unsigned long long>(address), bytes, why, fills.size());
+        return std::nullopt;
+    };
+    if (found == fills.begin()) return miss("no fill below");
+    --found;
+    if (found->first > address || address + bytes > found->first + found->second.bytes) return miss("no covering fill");
+    if (!GuestMemory::UnchangedSince(found->first, found->second.bytes, found->second.generation)) {
+        fills.erase(found);
+        return miss("written since the fill");
+    }
+    return found->second.word;
+}
+
+bool recordHtileFill(const Context& context, Recorder& recorder, std::uint64_t address, std::size_t bytes, std::uint32_t word) {
+    const auto* import = HostImportFor(context, address, bytes);
+    if (import == nullptr || import->buffer == VK_NULL_HANDLE) return false;
+    recorder.FlushKeyStoresOverlapping(address, bytes);
+    recorder.FlushStoresOverlapping(address, bytes);
+    const auto commands = recorder.Commands();
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    context.Resolved(&DeviceFunctions::cmdFillBuffer, "vkCmdFillBuffer")(commands, import->buffer, address - import->base, bytes, word);
+    RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_HOST_READ_BIT);
+    recorder.NotePendingWrite(address, bytes);
+    return true;
+}
+
 std::optional<std::uint32_t> htileAfterPendingFills(const Recorder& recorder, std::uint64_t address, std::size_t bytes) {
     auto writes = recorder.PendingWritesOver(address, bytes);
     std::sort(writes.begin(), writes.end(), [](const Recorder::PendingWrite& a, const Recorder::PendingWrite& b) { return a.note > b.note; });
