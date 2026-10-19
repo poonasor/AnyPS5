@@ -8,6 +8,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <map>
+#include <mutex>
+#include <string>
 
 namespace AgcDriver::Graphics {
 
@@ -39,7 +42,8 @@ constexpr VkBufferUsageFlags deviceUsage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | 
 }
 
 BufferPool::BufferPool(const Context& context) : maxSlots(std::max<std::size_t>(1, std::min<std::size_t>(MaxSlots(), context.limits.maxMemoryAllocationCount / 6u))), cacheReclaim(context.cacheReclaim), device(context.device), unmap(context.Function<PFN_vkUnmapMemory>("vkUnmapMemory")), destroyBuffer(context.Function<PFN_vkDestroyBuffer>("vkDestroyBuffer")), freeMemory(context.Function<PFN_vkFreeMemory>("vkFreeMemory")), allocateMemory(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")), mapMemory(context.Function<PFN_vkMapMemory>("vkMapMemory")), physical(context.physical), memoryProperties(context.memory), memoryProperties2(context.memoryProperties2) {
-    smallTier.budget = smallBudget;
+    static const char* smallMib = std::getenv("APS5_EXPERIMENT_SMALL_POOL_MIB");
+    smallTier.budget = smallMib != nullptr ? static_cast<VkDeviceSize>(std::strtoull(smallMib, nullptr, 10)) << 20u : smallBudget;
     static const char* largeMib = std::getenv("APS5_EXPERIMENT_LARGE_POOL_MIB");
     largeTier.budget = largeMib != nullptr ? static_cast<VkDeviceSize>(std::strtoull(largeMib, nullptr, 10)) << 20u : budget;
     deviceTier.budget = deviceBudget(context);
@@ -58,10 +62,45 @@ BufferPool::~BufferPool() {
     for (auto& [memory, block] : slabBlocks) freeBlock(*block);
 }
 
+namespace {
+
+// APS5_PROFILE_DRAW: vkAllocateMemory calls through AllocateMemory by operation, every 10 s.
+struct AllocationCounts {
+    std::mutex mutex;
+    std::map<std::string, std::pair<std::uint64_t, double>> byOperation;
+    std::chrono::steady_clock::time_point lastReport = std::chrono::steady_clock::now();
+};
+
+void countAllocation(const char* operation, double us, VkDeviceSize bytes) {
+    static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
+    if (!profile) return;
+    static AllocationCounts counts;
+    std::lock_guard lock(counts.mutex);
+    auto& entry = counts.byOperation[operation];
+    ++entry.first;
+    entry.second += us;
+    static_cast<void>(bytes);
+    const auto now = std::chrono::steady_clock::now();
+    if (now - counts.lastReport < std::chrono::seconds(10)) return;
+    counts.lastReport = now;
+    std::string text = "[allocations] vkAllocateMemory by operation (10 s, count/ms):";
+    for (const auto& [name, value] : counts.byOperation) {
+        char item[160];
+        std::snprintf(item, sizeof(item), " %s %llu/%.1f;", name.c_str(), static_cast<unsigned long long>(value.first), value.second / 1000.0);
+        text += item;
+    }
+    AgcDriver::ProfilePrint_nid_no_patch("%s%c", text.c_str(), 10);
+    counts.byOperation.clear();
+}
+
+}
+
 VkDeviceMemory BufferPool::AllocateMemory(const VkMemoryAllocateInfo& allocation, const char* operation, std::optional<std::uint32_t> hostType, std::uint32_t* allocatedType) {
     if (allocatedType != nullptr) *allocatedType = allocation.memoryTypeIndex;
     VkDeviceMemory memory = VK_NULL_HANDLE;
+    const auto allocationStart = std::chrono::steady_clock::now();
     auto result = allocateMemory(device, &allocation, nullptr, &memory);
+    countAllocation(operation, std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - allocationStart).count(), allocation.allocationSize);
     const auto initialResult = result;
     unsigned attempts = 1;
     VkDeviceSize reclaimed = 0;

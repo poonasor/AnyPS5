@@ -207,7 +207,21 @@ ShaderMemory::PendingWrite Driver::classifyPendingWrite(std::uint64_t address, s
 ShaderMemory::PendingWrite Driver::queryPendingWrite(std::uint64_t address, std::size_t bytes, std::span<std::byte> known) {
     if (DrawPipeline::Active()) {
         auto& pipeline = DrawPipeline::Queue0();
-        if (pipeline.Busy() && pipeline.Overlaps(address, bytes)) pipeline.Drain(DrawPipeline::DrainReason::Capture);
+        if (pipeline.Busy() && pipeline.Overlaps(address, bytes)) {
+            // APS5_EXPERIMENT_NO_PROBE_DRAIN (fork): a page probe (no word asked) only learns that the
+            // page is written by queued work, so it is read word by word; a word under a queued label
+            // takes the label's value, which the committer stores before any later read in queue order.
+            static const bool noProbeDrain = std::getenv("APS5_EXPERIMENT_NO_PROBE_DRAIN") != nullptr;
+            if (noProbeDrain && known.empty()) return ShaderMemory::PendingWrite::Sync;
+            if (noProbeDrain && bytes <= sizeof(std::uint64_t) && known.size() >= bytes) {
+                if (const auto value = pipeline.PendingLabel(address, bytes)) {
+                    std::memcpy(known.data(), &*value, bytes);
+                    return ShaderMemory::PendingWrite::KnownValue;
+                }
+            }
+            DrawPipeline::TraceCaptureDrain("pending-write query", address, bytes);
+            pipeline.Drain(DrawPipeline::DrainReason::Capture);
+        }
     }
     std::uint64_t ValidateCounters::*reason = nullptr;
     PendingView pending;

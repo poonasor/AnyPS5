@@ -268,4 +268,25 @@ bool DrawPipeline::Overlaps(std::uint64_t address, std::size_t bytes) {
     return false;
 }
 
+std::optional<DrawPipeline::Range> DrawPipeline::FirstOverlap(std::uint64_t address, std::size_t bytes) {
+    const auto end = address + bytes;
+    std::lock_guard lock(mutex);
+    for (const auto& item : items) {
+        for (const auto& range : item.writes) {
+            if (address < range.second && range.first < end) return range;
+        }
+    }
+    return std::nullopt;
+}
+
+void DrawPipeline::TraceCaptureDrain(const char* site, std::uint64_t address, std::size_t bytes) {
+    static const bool trace = std::getenv("APS5_EXPERIMENT_TRACE_CAPTURE_DRAIN") != nullptr;
+    if (!trace) return;
+    static std::atomic<int> budget{400};
+    if (budget.fetch_sub(1, std::memory_order_relaxed) <= 0) return;
+    const auto range = Queue0().FirstOverlap(address, bytes);
+    if (!range) return;
+    std::fprintf(stderr, "[capture-drain] %s read 0x%llx+0x%zx overlaps queued write 0x%llx+0x%llx (%zu queued)\n", site, static_cast<unsigned long long>(address), bytes, static_cast<unsigned long long>(range->first), static_cast<unsigned long long>(range->second - range->first), Queue0().Outstanding());
+}
+
 }

@@ -251,6 +251,7 @@ void drainPendingInputWrites(std::uint32_t queueId, std::initializer_list<std::p
     auto& pipeline = DrawPipeline::Queue0();
     for (const auto& [address, bytes] : inputs) {
         if (!pipeline.Overlaps(address, bytes)) continue;
+        DrawPipeline::TraceCaptureDrain("fill input", address, bytes);
         pipeline.Drain(DrawPipeline::DrainReason::Capture, 0x15);
         return;
     }
