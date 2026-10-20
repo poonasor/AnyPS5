@@ -5435,8 +5435,8 @@ namespace {
 
 // APS5_EXPERIMENT_RECORD_TIMING (fork): PrepareDrawBindings by part, every 10 s.
 struct BindingSteps {
-    static constexpr int Count = 4;
-    static constexpr const char* Names[Count] = {"snapshots", "allocate sets", "write prep", "vkUpdateDescriptorSets"};
+    static constexpr int Count = 5;
+    static constexpr const char* Names[Count] = {"snapshots", "allocate sets", "write prep", "vkUpdateDescriptorSets", "keep"};
     bool on = false;
     std::size_t writes = 0;
     std::chrono::steady_clock::time_point last;
@@ -5644,6 +5644,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
     steps.writes = writes.size();
     recorder.Keep(result);
     for (const auto& snapshot : result->snapshots) recorder.KeepBytes(snapshot.buffer.get(), snapshot.buffer->Bytes().size());
+    steps.mark(4);
     return result;
 }
 

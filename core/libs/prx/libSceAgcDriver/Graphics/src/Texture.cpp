@@ -3798,7 +3798,10 @@ bool StorageTexture::FlushPending(std::uint64_t address, std::size_t bytes, cons
         for (const auto& texture : flush) std::fprintf(stderr, "[flush] image 0x%llx+0x%llx for %s 0x%llx+0x%zx\n", static_cast<unsigned long long>(texture->descriptor.baseAddress), static_cast<unsigned long long>(texture->guestBytes), reason, static_cast<unsigned long long>(address), bytes);
     }
     std::lock_guard gpu(GuestMemory::GpuMutex());
-    if (auto* recorder = Recorder::Active(); recorder != nullptr && !Recorder::InCompletion() && recorder->PendingWriterSerial(address, bytes) != 0) {
+    // APS5_EXPERIMENT_FLUSH_NO_SYNC (fork): store without first waiting for GPU work that writes the range (measures
+    // what the ~50 waits per frame cost; the store's CPU-side comparisons may then see older bytes).
+    static const bool noSync = std::getenv("APS5_EXPERIMENT_FLUSH_NO_SYNC") != nullptr;
+    if (auto* recorder = Recorder::Active(); !noSync && recorder != nullptr && !Recorder::InCompletion() && recorder->PendingWriterSerial(address, bytes) != 0) {
         try {
             recorder->Reap();
             if (const auto writer = recorder->PendingWriterSerial(address, bytes); writer == recorder->OpenSerial()) {

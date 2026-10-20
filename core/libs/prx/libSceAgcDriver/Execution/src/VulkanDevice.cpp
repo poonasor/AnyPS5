@@ -4090,8 +4090,41 @@ void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParamete
     // GPU mutex); APS5_TRACE_DRAWS=1 restores them.
     if (TargetTrace::Enabled()) {
         const auto indices = static_cast<std::uint64_t>(draw.indexCount) * std::max<std::uint32_t>(draw.instanceCount, 1u);
-        if (graphics.colors.empty()) TargetTrace::Get().Note(0, graphics.renderExtent.width, graphics.renderExtent.height, 0, indices);
+        if (graphics.colors.empty()) TargetTrace::Get().Note(graphics.depth ? graphics.depth->address + graphics.depth->firstSlice : 0, graphics.renderExtent.width, graphics.renderExtent.height, graphics.depth ? -static_cast<int>(graphics.depth->format) : 0, indices);
         for (const auto& color : graphics.colors) TargetTrace::Get().Note(color.address, color.extent.width, color.extent.height, static_cast<int>(color.format), indices);
+    }
+    // APS5_EXPERIMENT_SKIP_TARGETS=item,item (fork): drop draws into these colour targets, or depth-only draws into
+    // these depth targets, to measure what a pass costs. An item is a hex address as printed by [targets], or WxH
+    // (decimal extent: every target of that size, since a pass's addresses change between frames).
+    struct SkipItem {
+        std::uint64_t address = 0;
+        std::uint32_t width = 0, height = 0;
+    };
+    static const std::vector<SkipItem> skipTargets = [] {
+        std::vector<SkipItem> result;
+        if (const char* text = std::getenv("APS5_EXPERIMENT_SKIP_TARGETS")) {
+            std::string all(text);
+            std::size_t start = 0;
+            while (start < all.size()) {
+                auto end = all.find(',', start);
+                if (end == std::string::npos) end = all.size();
+                const auto item = all.substr(start, end - start);
+                start = end + 1;
+                const auto cross = item.find('x', 2);
+                if (cross != std::string::npos && item.rfind("0x", 0) != 0) result.push_back({0, static_cast<std::uint32_t>(std::stoul(item.substr(0, cross))), static_cast<std::uint32_t>(std::stoul(item.substr(cross + 1)))});
+                else if (!item.empty()) result.push_back({std::stoull(item, nullptr, 16), 0, 0});
+            }
+        }
+        return result;
+    }();
+    if (!skipTargets.empty()) {
+        const auto skipped = [&](std::uint64_t address, VkExtent2D extent) { return std::any_of(skipTargets.begin(), skipTargets.end(), [&](const SkipItem& item) { return item.width != 0 ? item.width == extent.width && item.height == extent.height : item.address == address; }); };
+        static std::atomic<std::uint64_t> dropped{0};
+        const bool drop = graphics.colors.empty() ? graphics.depth && skipped(graphics.depth->address + graphics.depth->firstSlice, graphics.renderExtent) : std::any_of(graphics.colors.begin(), graphics.colors.end(), [&](const auto& color) { return skipped(color.address, color.extent); });
+        if (drop) {
+            if (dropped.fetch_add(1) % 100000 == 0) std::fprintf(stderr, "[skip-targets] %llu draws dropped%c", static_cast<unsigned long long>(dropped.load()), 10);
+            return;
+        }
     }
     static const bool trace = std::getenv("APS5_TRACE_DRAWS") != nullptr;
     if (trace) APS5_LOG_OUT("VulkanDevice::Draw indices=%u instances=%u indexSize=%u address=0x%llx shaders=%zu colorTarget=%u", draw.indexCount, draw.instanceCount, draw.indexSize, static_cast<unsigned long long>(draw.indexAddress), shaders.size(), static_cast<unsigned>(graphics.hasColorTarget));

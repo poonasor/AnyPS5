@@ -1910,8 +1910,9 @@ namespace {
 
 // APS5_EXPERIMENT_RECORD_TIMING (fork): where recordDraw's time goes, by sub-step, every 10 s.
 struct RecordSteps {
-    static constexpr int Count = 10;
-    static constexpr const char* Names[Count] = {"stores", "bindings", "pass access", "start pass", "barrier notes", "begin", "bind sets", "push", "draw cmds", "leave pass"};
+    static constexpr int Count = 11;
+    static constexpr const char* Names[Count] = {"stores", "bindings", "pass access", "start pass", "barrier notes", "begin", "bind sets", "push", "draw cmds", "leave pass", "of bindings: none"};
+    double lastDelta = 0;
     bool on = false;
     std::chrono::steady_clock::time_point last;
     RecordSteps() {
@@ -1922,7 +1923,8 @@ struct RecordSteps {
     void mark(int step) {
         if (!on) return;
         const auto now = std::chrono::steady_clock::now();
-        totals()[step] += std::chrono::duration<double, std::micro>(now - last).count();
+        lastDelta = std::chrono::duration<double, std::micro>(now - last).count();
+        totals()[step] += lastDelta;
         last = now;
     }
     ~RecordSteps() {
@@ -1986,6 +1988,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     steps.mark(0);
     const auto drawBindings = resources.PrepareDrawBindings(*recorder, record.moved);
     steps.mark(1);
+    if (steps.on && drawBindings == nullptr) RecordSteps::totals()[10] += steps.lastDelta;
     const bool capture = CaptureInputsEnabled();
     const bool meshIndirect = state.stages.mesh && args != nullptr;
     const bool addressBased = resources.HoldsLease();
