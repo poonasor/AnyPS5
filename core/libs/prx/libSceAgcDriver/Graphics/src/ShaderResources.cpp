@@ -5431,8 +5431,56 @@ std::size_t ShaderResources::DrawUploadLimit() {
     return limit;
 }
 
+namespace {
+
+// APS5_EXPERIMENT_RECORD_TIMING (fork): PrepareDrawBindings by part, every 10 s.
+struct BindingSteps {
+    static constexpr int Count = 4;
+    static constexpr const char* Names[Count] = {"snapshots", "allocate sets", "write prep", "vkUpdateDescriptorSets"};
+    bool on = false;
+    std::size_t writes = 0;
+    std::chrono::steady_clock::time_point last;
+    BindingSteps() {
+        static const bool enabled = std::getenv("APS5_EXPERIMENT_RECORD_TIMING") != nullptr;
+        on = enabled;
+        if (on) last = std::chrono::steady_clock::now();
+    }
+    void mark(int step) {
+        if (!on) return;
+        const auto now = std::chrono::steady_clock::now();
+        totals()[step] += std::chrono::duration<double, std::micro>(now - last).count();
+        last = now;
+    }
+    ~BindingSteps() {
+        if (!on) return;
+        static thread_local std::uint64_t calls = 0, writeTotal = 0;
+        static thread_local auto lastReport = std::chrono::steady_clock::now();
+        ++calls;
+        writeTotal += writes;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastReport < std::chrono::seconds(10)) return;
+        lastReport = now;
+        std::string text = "[binding-steps] " + std::to_string(calls) + " calls (10 s), " + std::to_string(calls != 0 ? writeTotal / calls : 0) + " writes each, us per call:";
+        for (int i = 0; i < Count; ++i) {
+            char item[64];
+            std::snprintf(item, sizeof(item), " %s %.1f", Names[i], totals()[i] / static_cast<double>(calls));
+            text += item;
+            totals()[i] = 0;
+        }
+        calls = writeTotal = 0;
+        std::fprintf(stderr, "%s%c", text.c_str(), 10);
+    }
+    static std::array<double, Count>& totals() {
+        static thread_local std::array<double, Count> values{};
+        return values;
+    }
+};
+
+}
+
 std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved, bool movedOnly) const {
     if ((_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) || usesBda) return {};
+    BindingSteps steps;
     thread_local std::vector<std::pair<std::uint64_t, std::uint64_t>>* readsSlot = nullptr;
     auto& reads = ShaderRecompiler::ThreadOwned(readsSlot);
     guestMemory.InPlaceReads(reads);
@@ -5525,6 +5573,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
         totalSnapshotBytes += bytes;
         CaptureTrace::Log("draw-snapshot batch=%llu address=%llx bytes=%zu", static_cast<unsigned long long>(recorder.Submissions() + 1), static_cast<unsigned long long>(begin), bytes);
     }
+    steps.mark(0);
     if (selected.empty()) return {};
     Require(context.descriptorCache != nullptr, "draw snapshots require a descriptor cache");
     std::array<bool, 2> described{};
@@ -5555,6 +5604,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
         result->fragmentLayout = fragment.layout;
         Require(result->fragmentAllocation.set != VK_NULL_HANDLE, "draw snapshot descriptor allocation failed");
     }
+    steps.mark(1);
     thread_local std::vector<VkDescriptorBufferInfo>* buffersSlot = nullptr;
     auto& buffers = ShaderRecompiler::ThreadOwned(buffersSlot);
     buffers = descriptorBuffers;
@@ -5583,7 +5633,10 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
         }
     }
     Require(nextWrite == writes.end(), "draw snapshot writes disagree with their descriptor bindings");
+    steps.mark(2);
     context.Resolved(&DeviceFunctions::updateDescriptorSets, "vkUpdateDescriptorSets")(context.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    steps.mark(3);
+    steps.writes = writes.size();
     recorder.Keep(result);
     for (const auto& snapshot : result->snapshots) recorder.KeepBytes(snapshot.buffer.get(), snapshot.buffer->Bytes().size());
     return result;
