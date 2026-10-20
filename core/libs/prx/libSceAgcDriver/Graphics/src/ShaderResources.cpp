@@ -5480,6 +5480,9 @@ struct BindingSteps {
 
 std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindings(Recorder& recorder, std::span<const MovedBuffer> moved, bool movedOnly) const {
     if ((_set == VK_NULL_HANDLE && fragment.set == VK_NULL_HANDLE) || usesBda) return {};
+    // With snapshots switched off (APS5_DRAW_SNAPSHOT_MAX_MIB=0) only moved buffers can be selected: skip the
+    // per-allocation overlap checks, which cost more than the snapshots themselves.
+    if (maxDrawSnapshotBytes == 0 && moved.empty()) return {};
     BindingSteps steps;
     thread_local std::vector<std::pair<std::uint64_t, std::uint64_t>>* readsSlot = nullptr;
     auto& reads = ShaderRecompiler::ThreadOwned(readsSlot);
