@@ -1906,7 +1906,53 @@ bool WriteOnlyPasses() {
     return enabled;
 }
 
+namespace {
+
+// APS5_EXPERIMENT_RECORD_TIMING (fork): where recordDraw's time goes, by sub-step, every 10 s.
+struct RecordSteps {
+    static constexpr int Count = 10;
+    static constexpr const char* Names[Count] = {"stores", "bindings", "pass access", "start pass", "barrier notes", "begin", "bind sets", "push", "draw cmds", "leave pass"};
+    bool on = false;
+    std::chrono::steady_clock::time_point last;
+    RecordSteps() {
+        static const bool enabled = std::getenv("APS5_EXPERIMENT_RECORD_TIMING") != nullptr;
+        on = enabled;
+        if (on) last = std::chrono::steady_clock::now();
+    }
+    void mark(int step) {
+        if (!on) return;
+        const auto now = std::chrono::steady_clock::now();
+        totals()[step] += std::chrono::duration<double, std::micro>(now - last).count();
+        last = now;
+    }
+    ~RecordSteps() {
+        if (!on) return;
+        static thread_local std::uint64_t draws = 0;
+        static thread_local auto lastReport = std::chrono::steady_clock::now();
+        ++draws;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastReport < std::chrono::seconds(10)) return;
+        lastReport = now;
+        std::string text = "[record-steps] " + std::to_string(draws) + " draws (10 s), us per draw:";
+        for (int i = 0; i < Count; ++i) {
+            char item[48];
+            std::snprintf(item, sizeof(item), " %s %.1f", Names[i], totals()[i] / static_cast<double>(draws));
+            text += item;
+            totals()[i] = 0;
+        }
+        draws = 0;
+        std::fprintf(stderr, "%s%c", text.c_str(), 10);
+    }
+    static std::array<double, Count>& totals() {
+        static thread_local std::array<double, Count> values{};
+        return values;
+    }
+};
+
+}
+
 void recordDraw(const Context& context, const State& state, const Pm4::DrawParameters& draw, std::span<const CompiledShader> shaders, DrawInputs& inputs, RecordedDraw& record, DrawOutcome& outcome, DrawTimer& timer, double& ownWaitedMs) {
+    RecordSteps steps;
     auto* recorder = record.recorder;
     auto& resources = *record.resources;
     const auto* args = record.indirect != nullptr ? record.indirect->args : nullptr;
@@ -1937,7 +1983,9 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         recorder->FlushStores();
         outcome.storesFlushed = true;
     }
+    steps.mark(0);
     const auto drawBindings = resources.PrepareDrawBindings(*recorder, record.moved);
+    steps.mark(1);
     const bool capture = CaptureInputsEnabled();
     const bool meshIndirect = state.stages.mesh && args != nullptr;
     const bool addressBased = resources.HoldsLease();
@@ -1987,7 +2035,9 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     }
     const PassAccess passAccess{passReads, passWrites, passImages, passAttachments, unknownMemory, unknownWrites, passWriteOnly};
     const bool fenced = state.depth.has_value() || !record.proxies.empty();
+    steps.mark(2);
     const auto start = recorder->StartDrawPass(passKey, capture || readsTarget || gpuIndirect || meshIndirect, fenced, passAccess);
+    steps.mark(3);
     for (const auto& target : record.multisampleTargets) KeepMultisampleTarget_nid_no_patch(target);
     const bool continued = start.continued;
     outcome.passContinued = continued;
@@ -2011,6 +2061,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         }
         recorder->NoteAccess(CommandClass::Draw, Recorder::Access{reads, resources.GpuWrites(), images, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_VERTEX_INPUT_BIT | inputs.shaderStages, resources.HoldsLease()});
     }
+    steps.mark(4);
     std::unique_ptr<DeviceBuffer> scratch;
     std::shared_ptr<Buffer> meshArguments;
     VkBuffer argumentBuffer = VK_NULL_HANDLE;
@@ -2051,6 +2102,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         record.pipeline->Begin(commands, *record.framebuffer, state.renderExtent, state);
     }
     APS5_LOG_CHARS_OUT_DEBUG("Pipeline Begin OK");
+    steps.mark(5);
     if (drawBindings != nullptr) {
         const auto set = drawBindings->allocation.set;
         const auto fragmentSet = drawBindings->fragmentAllocation.set;
@@ -2060,8 +2112,10 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         resources.Bind(commands, VK_PIPELINE_BIND_POINT_GRAPHICS, record.pipeline->Layout());
     }
     APS5_LOG_CHARS_OUT_DEBUG("Resources bound");
+    steps.mark(6);
     pushDrawConstants(*record.pipeline, commands, state, draw, shaders, resources, record.pushBytes, record.pushStages, meshArguments != nullptr ? meshArguments->DeviceAddress() : 0, !inputs.restartTable.empty());
     APS5_LOG_CHARS_OUT_DEBUG("Push constants recorded");
+    steps.mark(7);
     static const bool experimentDrawProgramTiming = std::getenv("APS5_EXPERIMENT_DRAW_PROGRAM_TIMING") != nullptr;
     std::uint32_t programTiming = Recorder::NoTiming;
     if (experimentDrawProgramTiming) {
@@ -2089,6 +2143,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
     if (args != nullptr) CountIndirectDraw(record.indirect->path, record.indirect->readMs, rewritten);
     auto checkRecords = indirectRecordCheck(record.indirect);
     APS5_LOG_CHARS_OUT_DEBUG("Draw recorded");
+    steps.mark(8);
     std::function<void(VkCommandBuffer)> storeProxies;
     if (!continued && (!record.proxies.empty() || !record.reordered.empty() || record.depthLocations)) {
         storeProxies = [proxies = record.proxies, reordered = record.reordered, reorderPass = record.reorderPass, depthLocations = record.depthLocations, context, recorder](VkCommandBuffer passCommands) {
@@ -2109,6 +2164,7 @@ void recordDraw(const Context& context, const State& state, const Pm4::DrawParam
         };
     }
     recorder->LeaveRenderPassOpen(passKey, drawTiming, fenced, passAccess, std::move(storeProxies));
+    steps.mark(9);
     timer.phase(PhaseRecord);
     keepRecordedDraw(*recorder, record.resources, std::move(record.pipeline), std::move(record.framebuffer), inputs, std::move(record.targets), std::move(record.targetSlices), std::move(scratch), std::move(checkRecords), record.listed, record.completion, outcome);
     timer.phase(PhaseKeep);
