@@ -4111,16 +4111,18 @@ void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParamete
                 const auto item = all.substr(start, end - start);
                 start = end + 1;
                 const auto cross = item.find('x', 2);
-                if (cross != std::string::npos && item.rfind("0x", 0) != 0) result.push_back({0, static_cast<std::uint32_t>(std::stoul(item.substr(0, cross))), static_cast<std::uint32_t>(std::stoul(item.substr(cross + 1)))});
+                if (!item.empty() && item[0] == 'v') result.push_back({std::stoull(item.substr(1), nullptr, 16), 0, 1u});
+                else if (cross != std::string::npos && item.rfind("0x", 0) != 0) result.push_back({0, static_cast<std::uint32_t>(std::stoul(item.substr(0, cross))), static_cast<std::uint32_t>(std::stoul(item.substr(cross + 1)))});
                 else if (!item.empty()) result.push_back({std::stoull(item, nullptr, 16), 0, 0});
             }
         }
         return result;
     }();
     if (!skipTargets.empty()) {
-        const auto skipped = [&](std::uint64_t address, VkExtent2D extent) { return std::any_of(skipTargets.begin(), skipTargets.end(), [&](const SkipItem& item) { return item.width != 0 ? item.width == extent.width && item.height == extent.height : item.address == address; }); };
+        const auto skipped = [&](std::uint64_t address, VkExtent2D extent) { return std::any_of(skipTargets.begin(), skipTargets.end(), [&](const SkipItem& item) { return item.width == 0 && item.height == 0 && item.address == address || item.width != 0 && item.width == extent.width && item.height == extent.height; }); };
+        const bool variantSkip = std::any_of(shaders.begin(), shaders.end(), [&](const Graphics::CompiledShader& shader) { return shader.program != nullptr && std::any_of(skipTargets.begin(), skipTargets.end(), [&](const SkipItem& item) { return item.width == 0 && item.height == 1u && item.address == shader.program->variantId; }); });
         static std::atomic<std::uint64_t> dropped{0};
-        const bool drop = graphics.colors.empty() ? graphics.depth && skipped(graphics.depth->address + graphics.depth->firstSlice, graphics.renderExtent) : std::any_of(graphics.colors.begin(), graphics.colors.end(), [&](const auto& color) { return skipped(color.address, color.extent); });
+        const bool drop = variantSkip || graphics.colors.empty() ? graphics.depth && skipped(graphics.depth->address + graphics.depth->firstSlice, graphics.renderExtent) : std::any_of(graphics.colors.begin(), graphics.colors.end(), [&](const auto& color) { return skipped(color.address, color.extent); });
         if (drop) {
             if (dropped.fetch_add(1) % 100000 == 0) std::fprintf(stderr, "[skip-targets] %llu draws dropped%c", static_cast<unsigned long long>(dropped.load()), 10);
             return;
@@ -4129,7 +4131,48 @@ void VulkanDevice::Draw(const Graphics::State& graphics, const Pm4::DrawParamete
     static const bool trace = std::getenv("APS5_TRACE_DRAWS") != nullptr;
     if (trace) APS5_LOG_OUT("VulkanDevice::Draw indices=%u instances=%u indexSize=%u address=0x%llx shaders=%zu colorTarget=%u", draw.indexCount, draw.instanceCount, draw.indexSize, static_cast<unsigned long long>(draw.indexAddress), shaders.size(), static_cast<unsigned>(graphics.hasColorTarget));
     const auto context = graphicsContext();
-    Graphics::Draw(context, graphics, draw, shaders, snapshots, recipe);
+    // APS5_EXPERIMENT_SHADER_TIMING (fork): committer time of Graphics::Draw by pixel-stage variant (the vertex
+    // stage's when there is no pixel stage), top 15 every 10 s, to find the shaders the frame's draw time goes to.
+    static const bool shaderTiming = std::getenv("APS5_EXPERIMENT_SHADER_TIMING") != nullptr;
+    if (shaderTiming) {
+        std::uint64_t key = 0, vertexKey = 0;
+        for (const auto& shader : shaders) {
+            if (shader.program == nullptr) continue;
+            if (shader.stage == ShaderRecompiler::ShaderStage::Fragment) key = shader.program->variantId;
+            else if (vertexKey == 0) vertexKey = shader.program->variantId;
+        }
+        if (key == 0) key = vertexKey;
+        const auto start = std::chrono::steady_clock::now();
+        Graphics::Draw(context, graphics, draw, shaders, snapshots, recipe);
+        const double us = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - start).count();
+        struct Entry { std::uint64_t draws = 0; double us = 0; std::uint64_t instances = 0; std::uint64_t vertexKey = 0; };
+        static std::mutex timingMutex;
+        static std::unordered_map<std::uint64_t, Entry> entries;
+        static auto lastReport = std::chrono::steady_clock::now();
+        std::lock_guard lock(timingMutex);
+        auto& entry = entries[key];
+        ++entry.draws;
+        entry.us += us;
+        entry.instances += std::max<std::uint32_t>(draw.instanceCount, 1u);
+        entry.vertexKey = vertexKey;
+        const auto now = std::chrono::steady_clock::now();
+        if (now - lastReport >= std::chrono::seconds(10)) {
+            lastReport = now;
+            std::vector<std::pair<std::uint64_t, Entry>> sorted(entries.begin(), entries.end());
+            std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.second.us > b.second.us; });
+            double total = 0;
+            std::uint64_t draws = 0;
+            for (const auto& [k, e] : sorted) { total += e.us; draws += e.draws; }
+            std::fprintf(stderr, "[shader-timing] 10 s: %llu draws, %.0f ms in Graphics::Draw, %zu pixel variants%c", static_cast<unsigned long long>(draws), total / 1000.0, sorted.size(), 10);
+            for (std::size_t i = 0; i < std::min<std::size_t>(15, sorted.size()); ++i) {
+                const auto& [k, e] = sorted[i];
+                std::fprintf(stderr, "[shader-timing]   ps %016llx vs %016llx: %llu draws %.0f ms (%.0f us each, %.1f instances each)%c", static_cast<unsigned long long>(k), static_cast<unsigned long long>(e.vertexKey), static_cast<unsigned long long>(e.draws), e.us / 1000.0, e.us / static_cast<double>(e.draws), static_cast<double>(e.instances) / static_cast<double>(e.draws), 10);
+            }
+            entries.clear();
+        }
+    } else {
+        Graphics::Draw(context, graphics, draw, shaders, snapshots, recipe);
+    }
     if (trace) APS5_LOG_CHARS_OUT("VulkanDevice::Draw complete");
 }
 

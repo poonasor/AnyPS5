@@ -1063,7 +1063,32 @@ void FlushForAccess(std::uint64_t address, std::size_t bytes) {
         hookLocks.fetch_add(1, std::memory_order_relaxed);
         GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Hook);
         std::lock_guard gpu(GuestMemory::GpuMutex());
-        if (auto* recorder = Recorder::Active(); recorder != nullptr && recorder->PendingWriteOverlaps(address, bytes)) {
+        // APS5_EXPERIMENT_HOOK_NO_WAIT_BYTES=N (fork): a game-thread read (site Unknown) of at most N bytes that
+        // recorded GPU work writes submits that work and reads what memory holds now, as the hardware would, instead
+        // of waiting for it to finish.
+        static const std::size_t noWaitBytes = [] { const char* text = std::getenv("APS5_EXPERIMENT_HOOK_NO_WAIT_BYTES"); return text != nullptr ? static_cast<std::size_t>(std::strtoull(text, nullptr, 10)) : std::size_t{0}; }();
+        auto* active = Recorder::Active();
+        // APS5_EXPERIMENT_HOOK_NO_WAIT_ADDRS=hex,hex limits it to reads starting at those addresses (all small reads
+        // without it lost the device in two runs).
+        static const std::vector<std::uint64_t> noWaitAddresses = [] {
+            std::vector<std::uint64_t> result;
+            if (const char* text = std::getenv("APS5_EXPERIMENT_HOOK_NO_WAIT_ADDRS")) {
+                for (char* cursor = const_cast<char*>(text); *cursor != 0;) {
+                    char* end = nullptr;
+                    const auto value = std::strtoull(cursor, &end, 16);
+                    if (end == cursor) break;
+                    result.push_back(value);
+                    cursor = *end == ',' ? end + 1 : end;
+                }
+            }
+            return result;
+        }();
+        const bool listed = noWaitAddresses.empty() || std::find(noWaitAddresses.begin(), noWaitAddresses.end(), address) != noWaitAddresses.end();
+        if (noWaitBytes != 0 && listed && active != nullptr && bytes <= noWaitBytes && GuestMemory::CurrentReadSite() == GuestMemory::ReadSite::Unknown && active->PendingWriteOverlaps(address, bytes)) {
+            static std::atomic<std::uint64_t> skipped{0};
+            if (skipped.fetch_add(1, std::memory_order_relaxed) % 10000 == 0) std::fprintf(stderr, "[hook-no-wait] %llu small game reads not waited for%c", static_cast<unsigned long long>(skipped.load()), 10);
+            active->Submit();
+        } else if (auto* recorder = active; recorder != nullptr && recorder->PendingWriteOverlaps(address, bytes)) {
             const HookSyncScope attribution(*recorder, address, bytes);
             Recorder::CountSync(1);
             // The wait runs without the mutex when this acquisition is the outermost one (a stage-A
